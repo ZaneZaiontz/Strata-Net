@@ -100,6 +100,7 @@
 #include "strata/net/stage_link.hpp"
 #include "strata/net/stage_ckpt_store.hpp"
 #include "strata/net/stage_park_store.hpp"
+#include "strata/net/stage_split_facts.hpp"
 #include "strata/core/mtp.hpp"
 #include "strata/core/gated_proposal.hpp"
 #if defined(STRATA_HAVE_DFLASH2)
@@ -3673,6 +3674,20 @@ int main(int argc, char** argv) {
                         "theirs into %s/peers/, and start every stage with STRATA_STAGE_TLS=%s.\n",
                         dir.c_str(), name.c_str(), fp.c_str(), name.c_str(), dir.c_str(), dir.c_str());
             return 0;
+        }
+        if (std::strcmp(argv[i], "--plan-split") == 0) {
+            strata::pool::SplitFacts facts;
+            std::string err;
+            int64_t slots = 0;
+            if (i + 1 >= argc || !strata::pool::read_split_facts(argv[i + 1], facts, err) ||
+                (!facts.profile.empty() && !strata::core::read_expert_profile(facts.profile, facts.model.n_layers, facts.n_expert,
+                                                                             facts.model.profile, slots, err))) {
+                std::fprintf(stderr, "strata: --plan-split FACTS: %s\n", i + 1 >= argc ? "no facts file given" : err.c_str());
+                return 2;
+            }
+            const strata::pool::SplitPlan plan = strata::pool::auto_pool(facts.model, facts.nodes);
+            std::printf("%s\n", strata::pool::split_plan_json(facts, plan).c_str());
+            return plan.ok ? 0 : 3;
         }
         // `strata --families`: the GGUF architectures this build runs (setup asks before it installs one)
         if (std::strcmp(argv[i], "--families") == 0) {
