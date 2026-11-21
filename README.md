@@ -234,14 +234,21 @@ Run **`strata connect`** to see setup instructions for your tool. [Connection gu
   including its TLS, the node agent, `stage_ship`, the tuner, checkpoints, parking and session files. It was proposed
   upstream as [PR #1748](https://github.com/Niko1221/Strata/pull/1748), and this fork comes from
   [lask3802/Strata-Link](https://github.com/lask3802/Strata-Link).
-- **The layer-major prompt-reading fix** for 256-expert models is by [fragtion](https://github.com/fragtion), from
-  [StrataPool](https://github.com/fragtion/StrataPool).
+- **From [StrataPool](https://github.com/fragtion/StrataPool)**, by [fragtion](https://github.com/fragtion): the
+  layer-major prompt-reading fix for 256-expert models; the split planner (`engine/src/net/stage_split.cpp`), which
+  picks where to cut the model from each PC's free memory and GPU speed; and the Windows build fixes (`/bigobj` for
+  MSVC, and the compiler probe without debug records for the engine and the image generator). A row format for each
+  stream on the link is StrataPool's idea too; Strata-Net built its own on Link's protocol. More of StrataPool is
+  being added one part at a time, and each part is credited here when it lands.
+- **The real events while a long prompt is read** are by [suifei](https://github.com/suifei), from upstream
+  [PR #4340](https://github.com/Niko1221/Strata/pull/4340) (closed unmerged), ported by way of StrataPool.
 - [YukihiroHemmi](https://github.com/YukihiroHemmi) (Arinko) read the link's code while building a SYCL worker, and
   [their report](https://github.com/Niko1221/Strata/pull/1748#issuecomment-6138154786) led to the frame-size hardening
   ([details](docs/remote-stage/ENGINEERING.md#a-readers-report-what-a-peer-can-make-a-process-do-2026-10-13)).
 - [edowadolui-lab](https://github.com/edowadolui-lab) ran a Radeon 8060S worker with an RTX 5070 main PC and
   [reported it](https://github.com/Niko1221/Strata/pull/1748#issuecomment-6332714185).
-- [ZaneZaiontz](https://github.com/ZaneZaiontz) maintains this fork and merges upstream releases into it.
+- [ZaneZaiontz](https://github.com/ZaneZaiontz) maintains this fork and merges upstream releases into it, and wrote
+  the slow-link and recovery changes and the planner's link costs.
 
 <a id="guides"></a>
 <a id="how-fast-is-it"></a>
