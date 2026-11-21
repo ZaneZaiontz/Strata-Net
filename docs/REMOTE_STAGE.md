@@ -592,9 +592,19 @@ It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...
   `SplitCalib` (`stage_split.hpp`). A window then costs `fixed_ms` (the main's own work outside its layers: head,
   sampling, drafter) plus `net_ms` plus each node's predicted time times its scale. It needs at least 200 measured
   windows, and a search stays within 3 layers of a split in `seen`, keeping the nodes in the order given.
+  `STRATA_REMOTE_TIMING=1` on the main gives the numbers every 64 windows: the `link` part of a round trip is
+  `net_ms`; the worker's part over the worker's `ms` in the plan for that split without `calib` is its scale. The
+  main's time between windows is its layers and `fixed_ms` together, which the lines do not separate: give the main
+  the worker's scale, and `fixed_ms` that time less the main's `ms` times the scale. Take the timings from the same
+  kind of work as `window_tokens`. SplitCalib has no term for the rows a window verifies, and every part grows with
+  them: on the test pair the main's time between windows was 22 ms on prose and 33 ms on code. There, timings from
+  three prose and three code requests predicted three other requests of each kind within 2%, at the split they came
+  from and at the planner's own pick one layer away; without them the estimate was 6-8% low on prose and 11-12%
+  high on code.
 - **Node, required:** `vram_room` (free VRAM with nothing loaded, less the reserves; on the main also less the head,
-  the drafter and the other weights outside the layers), `ram_room` (0: no limit), `layer_ms` (GPU time per layer
-  per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
+  the drafter and the other weights outside the layers), `ram_room` (RAM available with nothing loaded, less what
+  the engine takes besides its experts and K/V copies and a margin for the system: 3.4-3.6 GiB on the test worker,
+  the same through a 30K-token prompt; 0: no limit), `layer_ms` (GPU time per layer per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
   `up_mbit`, `down_mbit`, `delay=OTHER:MS,...` (one-way, to other nodes by name). With no speed or delay on any node
   a crossing costs `hop_ms`.
 
