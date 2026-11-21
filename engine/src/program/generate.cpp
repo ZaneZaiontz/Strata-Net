@@ -3685,7 +3685,7 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "strata: --plan-split FACTS: %s\n", i + 1 >= argc ? "no facts file given" : err.c_str());
                 return 2;
             }
-            const strata::pool::SplitPlan plan = strata::pool::auto_pool(facts.model, facts.nodes);
+            const strata::pool::SplitPlan plan = strata::pool::plan_split_facts(facts);
             std::printf("%s\n", strata::pool::split_plan_json(facts, plan).c_str());
             return plan.ok ? 0 : 3;
         }

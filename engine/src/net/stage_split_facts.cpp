@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <numeric>
 #include <set>
 #include <sstream>
 
@@ -129,6 +130,8 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
                 layer_facts[k] = v;
             } else if (k == "profile") {
                 f.profile = v;
+            } else if (k == "at") {
+                if (!parse_split(v, f.at)) return fail("at is the first layer of each later node, rising: 30 or 16,32");
             } else {
                 return fail("unknown fact \"" + k + "\"");
             }
@@ -175,6 +178,10 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
         err = "no node: give one node=NAME line per PC, the head PC first";
         return false;
     }
+    if (!f.at.empty() && f.at.size() + 1 != f.nodes.size()) {
+        err = "at needs one split point per node after the first";
+        return false;
+    }
     for (NodeCap& n : f.nodes) {
         if (!delays.count(n.name)) continue;
         std::istringstream list(delays[n.name]);
@@ -204,6 +211,14 @@ bool read_split_facts(const std::string& path, SplitFacts& f, std::string& err) 
     std::ostringstream text;
     text << in.rdbuf();
     return parse_split_facts(text.str(), f, err);
+}
+
+SplitPlan plan_split_facts(const SplitFacts& f) {
+    if (f.at.empty()) return auto_pool(f.model, f.nodes);
+    SplitPlan p = evaluate_split(f.model, f.nodes, f.at);
+    p.order.resize(f.nodes.size());
+    std::iota(p.order.begin(), p.order.end(), 0);
+    return p;
 }
 
 std::string split_plan_json(const SplitFacts& f, const SplitPlan& p) {

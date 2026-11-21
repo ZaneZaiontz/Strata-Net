@@ -24,13 +24,13 @@ static const std::string kModel = "# an 8-layer model, 1 GiB of experts a layer\
                                   "layer_arena_bytes=1073741824\n"
                                   "session_base_bytes=4096 session_layer_bytes=8388608\n";
 
-/// Parses `text`, gives the model a profile of every (layer, expert) pair and plans over every order of the nodes.
+/// Parses `text`, gives the model a profile of every (layer, expert) pair and plans as the mode does.
 static SplitPlan plan_of(const std::string& text, SplitFacts& f) {
     std::string err;
     CHECK(parse_split_facts(text, f, err) && err.empty());
     for (int32_t e = 0; e < 4; ++e)
         for (int32_t l = 0; l < 8; ++l) f.model.profile.push_back({l, e});
-    return auto_pool(f.model, f.nodes);
+    return plan_split_facts(f);
 }
 
 /// The window's network time: what the plan's window costs beyond its nodes' own time.
@@ -79,6 +79,20 @@ static void test_three_pcs() {
     CHECK(split_plan_json(f, p).find("\"last\":7,") != std::string::npos);
 }
 
+/// A split the facts fix is scored as given, the same as evaluate_split, even where the search would cut elsewhere;
+/// one the RAM cannot hold gives ok false.
+static void test_fixed_split() {
+    const std::string pcs = "node=desktop vram_room=4294967296 ram_room=4294967296 layer_ms=0.5\n"
+                            "node=laptop vram_room=3221225472 ram_room=5368709120 layer_ms=0.6\n";
+    SplitFacts f;
+    const SplitPlan p = plan_of(kModel + "at=3\n" + pcs, f);
+    const SplitPlan same = evaluate_split(f.model, f.nodes, {3});
+    CHECK(p.ok && p.at == std::vector<int64_t>{3} && p.order.size() == 2 && p.ms == same.ms && p.held == same.held);
+    CHECK(split_plan_json(f, p).find("{\"name\":\"laptop\",\"first\":3,\"last\":7") != std::string::npos);
+    const SplitPlan full = plan_of(kModel + "at=2\n" + pcs, f);
+    CHECK(!full.ok && full.why.find("laptop's RAM") != std::string::npos);
+}
+
 /// Facts the mode refuses, each with an error that says what is wrong; and facts that fit nowhere give ok false.
 static void test_bad_facts() {
     const std::string node = "node=a vram_room=1 ram_room=0 layer_ms=0.5\n";
@@ -99,6 +113,8 @@ static void test_bad_facts() {
         {kModel + "node=a vram_room=1 ram_room=0 layer_ms=0.5 delay=b:3\n", "delay"},
         {"layers=8 slot_bytes=1 layer_arena_bytes=1 session_layer_bytes=1 profile=p.bin\n" + node, "experts"},
         {kModel + "ring=2\n" + node, "ring"},
+        {kModel + "at=4\n" + node, "one split point per node"},
+        {kModel + "at=x\n" + node, "at is"},
     };
     for (const auto& b : bad) {
         SplitFacts f;
@@ -119,6 +135,7 @@ int main() {
     test_two_pcs();
     test_link_facts();
     test_three_pcs();
+    test_fixed_split();
     test_bad_facts();
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

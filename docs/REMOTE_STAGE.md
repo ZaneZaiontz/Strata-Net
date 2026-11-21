@@ -582,6 +582,8 @@ It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...
   `engine/include/strata/net/stage_split.hpp`: `window_tokens`, `window_rows`, `row_bytes`, `ring`,
   `hop_overhead_ms`, `hop_ms`, `miss_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_rows`,
   `answer_tokens`, `kv_copies`, `first_min`.
+- **A split of your own:** `at=30` (or `at=16,32` for three PCs) scores that split over every node in the order
+  given instead of searching, so a split you chose gets the same estimate.
 - **Node, required:** `vram_room` (free VRAM with nothing loaded, less the reserves; on the main also less the head,
   the drafter and the other weights outside the layers), `ram_room` (0: no limit), `layer_ms` (GPU time per layer
   per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
