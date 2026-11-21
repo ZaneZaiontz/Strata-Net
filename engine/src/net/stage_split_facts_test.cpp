@@ -23,7 +23,8 @@ static const std::string kModel = "# an 8-layer model, 1 GiB of experts a layer\
                                   "experts=4\n"
                                   "slot_bytes=1048576\n"
                                   "layer_arena_bytes=1073741824\n"
-                                  "session_base_bytes=4096 session_layer_bytes=8388608\n";
+                                  "session_base_bytes=4096 session_layer_bytes=8388608\n"
+                                  "miss_ms=190\n";
 
 /// Parses `text`, gives the model a profile of every (layer, expert) pair and plans as the mode does.
 static SplitPlan plan_of(const std::string& text, SplitFacts& f) {
@@ -120,6 +121,7 @@ static void test_bad_facts() {
         {kModel + "layers=9\n" + node, "twice"},
         {"layers=8 slot_bytes=1,2 layer_arena_bytes=1 session_layer_bytes=1\n" + node, "slot_bytes"},
         {"layers=8 slot_bytes=1 layer_arena_bytes=1\n" + node, "session_layer_bytes"},
+        {"layers=8 slot_bytes=1 layer_arena_bytes=1 session_layer_bytes=1\n" + node, "miss_ms"},
         {kModel + "node=a vram_room=1 ram_room=0\n", "layer_ms"},
         {kModel + "node=a vram_room=-5 ram_room=0 layer_ms=0.5\n", "vram_room"},
         {kModel + "node=a vram_room=1 ram_room=0 layer_ms=0\n", "layer_ms"},

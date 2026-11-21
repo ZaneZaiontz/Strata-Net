@@ -565,22 +565,26 @@ slot_bytes=2380800
 layer_arena_bytes=1218969600
 layer_kv=0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1
 session_base_bytes=314572800 session_layer_bytes=110773898
-window_tokens=1.83 window_rows=2 answer_tokens=400
+window_tokens=1.83 window_rows=2 answer_tokens=400 miss_ms=76
 node=main vram_room=7253741185 ram_room=56913559552 layer_ms=0.508 kv_host_layer=276488519 up_mbit=941 down_mbit=941 delay=worker:0.2
 node=worker vram_room=11302600704 ram_room=24252514304 layer_ms=0.475 kv_host_layer=276488519 up_mbit=941 down_mbit=941
 ```
 
 It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...},{"name":"worker","first":31,
-"last":47,...}],"window_ms":40.2,"decode_tok_s":45.5,...}` with the real per-layer sizes.
+"last":47,...}],"window_ms":33.1,"decode_tok_s":55.3,...}` with the real per-layer sizes.
 
 - **Model, required:** `layers`; `slot_bytes` (VRAM per cached expert), `layer_arena_bytes` (RAM for all of a
   layer's experts) and `session_layer_bytes` (a layer's VRAM besides its experts: session state and dense weights),
-  each one value for every layer or one per layer, comma-separated. **Optional:** `session_base_bytes` (VRAM a range
+  each one value for every layer or one per layer, comma-separated; and `miss_ms`, what one window pays per unit of
+  routed mass that no cache holds (the planner weighs the profile's ranks as a power law). It has no default: a
+  worker here reads its missed experts over PCIe, and on an RTX 5070 worker that measured about 40 ms per row a
+  window verifies (75 ms on prose at 2 rows, 150 ms on code at 4), against the 190 ms StrataPool measured for
+  misses its CPUs computed. **Optional:** `session_base_bytes` (VRAM a range
   takes whatever its layers), `layer_kv` (per layer, 1 where a `--kv-resident` PC keeps a pinned K/V copy),
   `profile` with `experts` (the expert profile the main runs with: without one no cache fills, so VRAM does not
   limit the plan), and the planner's workload and link settings, whose defaults and meaning are in
   `engine/include/strata/net/stage_split.hpp`: `window_tokens`, `window_rows`, `row_bytes`, `ring`,
-  `hop_overhead_ms`, `hop_ms`, `miss_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_rows`,
+  `hop_overhead_ms`, `hop_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_rows`,
   `answer_tokens`, `kv_copies`, `first_min`.
 - **A split of your own:** `at=30` (or `at=16,32` for three PCs) scores that split over every node in the order
   given instead of searching, so a split you chose gets the same estimate.

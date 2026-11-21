@@ -181,6 +181,10 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
             err = k + " must be one whole number or " + std::to_string(m.n_layers) + " of them, comma-separated";
             return false;
         }
+    if (!seen.count("miss_ms")) {
+        err = "missing miss_ms: what a window's experts missing from every cache cost, per unit of routed mass";
+        return false;
+    }
     const std::vector<int64_t> slots = per_layer["slot_bytes"], session = per_layer["session_layer_bytes"];
     m.slot_bytes = [slots](int64_t l) { return slots[(size_t) l]; };
     m.session_bytes = [session, session_base](int64_t lb, int64_t le) {
