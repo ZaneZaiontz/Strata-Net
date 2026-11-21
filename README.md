@@ -1,13 +1,13 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="apps/host/public/brand/strata-lockup-dark.svg">
+    <source media="(prefers-color-scheme: dark)" srcset="app/host/public/brand/strata-lockup-dark.svg">
     <img src="app/host/public/brand/strata-lockup-light.svg" alt="Strata-Net" width="340">
   </picture>
 </p>
 
 <h1 align="center">Strata-Net</h1>
 
-<p align="center"><sub>Strata-Net is a fork of lask3802's Strata-Link, which is a fork of Strata. Its mark uses a cyan middle bar so it is not mistaken for upstream Strata's.</sub></p>
+<p align="center"><sub>Strata-Net's mark uses a cyan middle bar so it is not mistaken for upstream Strata's.</sub></p>
 
 <h3 align="center">Run powerful AI on your own computer.</h3>
 <p align="center">Chat, code and work with images, locally.</p>
@@ -26,6 +26,14 @@
 </p>
 
 <p align="center"><sub><b>English</b> · <a href="docs/lang/README.zh-CN.md">简体中文</a> · <a href="docs/lang/README.ja.md">日本語</a> · <a href="docs/lang/README.de.md">Deutsch</a> · <a href="docs/lang/README.fr.md">Français</a> · <a href="docs/lang/README.es.md">Español</a> · <a href="docs/lang/README.pt-BR.md">Português</a> · <a href="docs/lang/README.pl.md">Polski</a></sub></p>
+
+**Strata-Net** is a fork of [Strata](https://github.com/Niko1221/Strata) that brings the work of two other forks into
+one project: lask3802's [Strata-Link](https://github.com/lask3802/Strata-Link), which splits one model across PCs on a
+LAN, and fragtion's [StrataPool](https://github.com/fragtion/StrataPool), whose parts are being added one at a time.
+The goal is to run a model on hardware people already have by pooling their PCs, including PCs that are not on the
+same network. It is mainly a feasibility project: the first question is whether a split model is usable over home
+internet. Today the split runs on a LAN; running it over the internet is planned and not built
+([what works today](#one-model-on-two-or-more-pcs)). Upstream Strata releases keep being merged in.
 
 **Free, open source, and yours to run.** Use Strata on your desktop or with your favorite coding tools. No account needed.
 
@@ -64,8 +72,9 @@ Not sure what fits? [Choose a model for your computer](docs/MODELS.md#pick-by-me
 
 ## One model on two or more PCs
 
-The main addition to Strata, from lask3802's Strata-Link: it can split the model across PCs on your network.
-This helps when the model does not fit one PC well, but you have a second PC with a graphics card.
+Strata-Net can split one model across PCs. The split is lask3802's remote stage from Strata-Link, and today it runs
+between PCs on the same network, over TLS 1.3 with each end checking the other's certificate. This helps when the
+model does not fit one PC well, but you have a second PC with a graphics card.
 
 - **Each PC loads only its own layers' experts into RAM**, so no PC needs RAM for the whole model. Every PC still needs
   the model's files; `terminal/tools/stage_ship.py` sends a worker only its layers.
@@ -96,10 +105,39 @@ What has been run, and what has not:
 
 | | |
 | --- | --- |
-| **Measured by us** | NVIDIA cards only (RTX 2080 Ti, 3080, 3070), on two and three PCs; a Linux main PC; Linux, Windows 11 and WSL2 workers; 1 GbE and 10 GbE links; the Qwen3.8-Flash-Next family only |
+| **Measured by us** | NVIDIA cards only (RTX 2080 Ti, 3080, 3070, 5070), on two and three PCs; a Linux main PC; Linux, Windows 11 and WSL2 workers; 1 GbE and 10 GbE links; the Qwen3.8-Flash-Next family only |
 | **Reported by a user** | An RTX 5070 main PC with a Radeon 8060S worker (AMD, HIP), both on Windows, over USB4; SC117's IQ3_XXS; on 0.1.45.3-link.1 ([report](https://github.com/Niko1221/Strata/pull/1748#issuecomment-6332714185)) |
 | **Not run by us** | An AMD main PC, a Windows main PC (one user report above), other models |
 | **Not supported** | Intel cards (the SYCL engine has no remote stage) and a Mac (the Metal engine refuses it at start) |
+
+What works today, in this tree:
+
+- **The split on a LAN**, as described above.
+- **A slow link.** The main engine's watchdog does not count the time a send or receive on the link is under way, up
+  to the link's own timeout, so a long prompt can finish over a slow link and a dead link still ends the request. Each
+  row stream on the link has its own format, and the rows only the drafter reads come back in bf16, half the bytes
+  ([details](docs/REMOTE_STAGE.md#options)).
+- **A PC or the link dropping mid-answer.** The request waits, the web chat shows "system dropped - recovering...",
+  and the answer carries on once the link is back. The main engine stays loaded through a lost link, and after a
+  reconnect to the same worker process it resumes from the last checkpoint both sides hold
+  ([details](docs/REMOTE_STAGE.md#a-pc-drops-in-the-middle-of-an-answer)).
+- **Real events while a long prompt is read**, every 5 s, so a client that only counts events does not take a slow
+  read for a dead server ([details](docs/DETAILS.md#streaming-and-tool-calls)).
+- **fragtion's split planner**, as a library, with link speed and delay added to its costs. It is built and tested,
+  but nothing calls it yet.
+
+Slow links have only been tested on a LAN with two PCs (an RTX 3080 and an RTX 5070), through a proxy that slows the
+link to 15 ms and 20 Mbit/s each way. No run between two homes has happened yet.
+
+Planned, not built:
+
+- Joining a pool over the internet by invite, into a pool that an admin runs. The first proof of concept uses
+  Tailscale.
+- A pool page where the admin picks a model and splits it across the pool's PCs, with the planner placing the layers.
+  Several admins per pool, with roles.
+- Each member controls their own PC: they can cap what it shares and pause it.
+- Windows and Linux with NVIDIA cards first, and one request at a time.
+- A security review of everything new.
 
 Setup, the earlier measurements and the limits: [docs/REMOTE_STAGE.md](docs/REMOTE_STAGE.md). This fork's releases:
 [ZaneZaiontz/Strata-Net](https://github.com/ZaneZaiontz/Strata-Net/releases).
