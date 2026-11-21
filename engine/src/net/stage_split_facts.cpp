@@ -52,6 +52,16 @@ static bool good_name(const std::string& s) {
     return true;
 }
 
+/// Every word of a calib line is one of SplitCalib::encode's keys with a value.
+static bool known_calib_words(const std::string& s) {
+    const std::set<std::string> keys = {"windows", "fixed_ms", "net_ms", "scale", "seen", "failed"};
+    std::istringstream words(s);
+    std::string word;
+    while (words >> word)
+        if (word.find('=') == std::string::npos || !keys.count(word.substr(0, word.find('=')))) return false;
+    return true;
+}
+
 bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err) {
     f = SplitFacts();
     SplitModel& m = f.model;
@@ -78,6 +88,12 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
             return false;
         };
         if (!line.empty() && line[0] == '#') continue;
+        if (line.rfind("calib ", 0) == 0) {
+            if (!f.calib.scale.empty()) return fail("calib is given twice");
+            if (!known_calib_words(line.substr(6)) || !f.calib.decode(line.substr(6)))
+                return fail("calib is SplitCalib's text: windows=N fixed_ms=MS net_ms=MS scale=S,S,... seen=K;...");
+            continue;
+        }
         std::istringstream words(line);
         std::string word;
         NodeCap* node = nullptr;
@@ -182,6 +198,11 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
         err = "at needs one split point per node after the first";
         return false;
     }
+    if (!f.calib.scale.empty() && !f.calib.usable(f.nodes.size())) {
+        err = "calib needs windows of at least " + std::to_string(SplitCalib::kMinWindows) +
+              ", one scale above 0 per node, and the splits it was measured with (seen)";
+        return false;
+    }
     for (NodeCap& n : f.nodes) {
         if (!delays.count(n.name)) continue;
         std::istringstream list(delays[n.name]);
@@ -214,8 +235,10 @@ bool read_split_facts(const std::string& path, SplitFacts& f, std::string& err) 
 }
 
 SplitPlan plan_split_facts(const SplitFacts& f) {
-    if (f.at.empty()) return auto_pool(f.model, f.nodes);
-    SplitPlan p = evaluate_split(f.model, f.nodes, f.at);
+    if (f.at.empty() && f.calib.scale.empty()) return auto_pool(f.model, f.nodes);
+    SplitModel m = f.model;
+    if (!f.calib.scale.empty()) m.calib = m.failures = &f.calib;
+    SplitPlan p = f.at.empty() ? auto_split(m, f.nodes) : evaluate_split(m, f.nodes, f.at);
     p.order.resize(f.nodes.size());
     std::iota(p.order.begin(), p.order.end(), 0);
     return p;
@@ -259,6 +282,7 @@ std::string split_plan_json(const SplitFacts& f, const SplitPlan& p) {
         real("request_ms", p.request_ms);
         real("mass", p.mass);
         whole("held", p.held);
+        o += std::string("\"measured\":") + (p.measured ? "true," : "false,");
     }
     o += "\"inputs\":{";
     whole("layers", m.n_layers);
@@ -278,6 +302,7 @@ std::string split_plan_json(const SplitFacts& f, const SplitPlan& p) {
     whole("answer_tokens", m.answer_tokens);
     whole("kv_copies", m.kv_copies);
     whole("first_min", m.first_min);
+    if (!f.calib.scale.empty()) o += "\"calib\":\"" + f.calib.encode() + "\",";
     o += "\"nodes\":[";
     for (const NodeCap& n : f.nodes) {
         o += "{\"name\":\"" + n.name + "\",";

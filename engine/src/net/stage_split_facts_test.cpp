@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace strata::pool;
 
@@ -93,6 +94,21 @@ static void test_fixed_split() {
     CHECK(!full.ok && full.why.find("laptop's RAM") != std::string::npos);
 }
 
+/// Measured timings in SplitCalib's text: the window is the coordinator's fixed time, the network's and each node's
+/// predicted time times its scale, and the plan says it is measured.  The search keeps the nodes' order.
+static void test_calib() {
+    const std::string pcs = "node=desktop vram_room=4294967296 ram_room=4294967296 layer_ms=0.5\n"
+                            "node=laptop vram_room=3221225472 ram_room=5368709120 layer_ms=0.6\n"
+                            "calib windows=500 fixed_ms=12 net_ms=3 scale=2,1 seen=4\n";
+    SplitFacts f;
+    const SplitPlan p = plan_of(kModel + "at=4\n" + pcs, f);
+    CHECK(p.ok && p.measured && std::fabs(p.ms - (12 + 3 + 2 * p.node_pred[0] + p.node_pred[1])) < 1e-9);
+    const std::string json = split_plan_json(f, p);
+    CHECK(json.find("\"measured\":true") != std::string::npos && json.find("\"calib\":\"windows=500 ") != std::string::npos);
+    const SplitPlan searched = plan_of(kModel + pcs, f);
+    CHECK(searched.ok && searched.measured && searched.order == std::vector<int>({0, 1}));
+}
+
 /// Facts the mode refuses, each with an error that says what is wrong; and facts that fit nowhere give ok false.
 static void test_bad_facts() {
     const std::string node = "node=a vram_room=1 ram_room=0 layer_ms=0.5\n";
@@ -115,6 +131,9 @@ static void test_bad_facts() {
         {kModel + "ring=2\n" + node, "ring"},
         {kModel + "at=4\n" + node, "one split point per node"},
         {kModel + "at=x\n" + node, "at is"},
+        {kModel + node + "calib windows=100 fixed_ms=1 net_ms=1 scale=1 seen=4\n", "calib needs"},
+        {kModel + node + "calib windows=500 fixed_ms=1 net_ms=1 scale=1,1 seen=4\n", "calib needs"},
+        {kModel + node + "calib windows=500 colour=red scale=1 seen=4\n", "SplitCalib's text"},
     };
     for (const auto& b : bad) {
         SplitFacts f;
@@ -136,6 +155,7 @@ int main() {
     test_link_facts();
     test_three_pcs();
     test_fixed_split();
+    test_calib();
     test_bad_facts();
     if (failures) {
         std::fprintf(stderr, "%d check(s) failed\n", failures);

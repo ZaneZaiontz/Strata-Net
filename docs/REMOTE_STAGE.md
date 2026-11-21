@@ -584,6 +584,10 @@ It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...
   `answer_tokens`, `kv_copies`, `first_min`.
 - **A split of your own:** `at=30` (or `at=16,32` for three PCs) scores that split over every node in the order
   given instead of searching, so a split you chose gets the same estimate.
+- **Measured timings:** a line `calib windows=N fixed_ms=MS net_ms=MS scale=S,S,... seen=K` in the text of StrataPool's
+  `SplitCalib` (`stage_split.hpp`). A window then costs `fixed_ms` (the main's own work outside its layers: head,
+  sampling, drafter) plus `net_ms` plus each node's predicted time times its scale. It needs at least 200 measured
+  windows, and a search stays within 3 layers of a split in `seen`, keeping the nodes in the order given.
 - **Node, required:** `vram_room` (free VRAM with nothing loaded, less the reserves; on the main also less the head,
   the drafter and the other weights outside the layers), `ram_room` (0: no limit), `layer_ms` (GPU time per layer
   per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
