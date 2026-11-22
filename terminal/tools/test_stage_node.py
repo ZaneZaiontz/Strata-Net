@@ -1325,5 +1325,27 @@ class NodePathsTest(unittest.TestCase):
         self.assertEqual(p["expert_profile"], "D:\\stage\\data\\prof.bin")
 
 
+class GpuInfoTest(unittest.TestCase):
+    """/info's GPU speed (matched to nvidia-smi's GPUs by PCI address) and its idle memory."""
+
+    def test_speed_by_bus_address(self):
+        smi = ("RTX A, 12227, 11735, 492, 5, 16, 16, 00000000:02:00.0, [N/A]\n"
+               "RTX B, 10240, 9800, 440, 4, 16, 16, 00000000:01:00.0, 2100\n")
+        with mock.patch.object(sn.shutil, "which", return_value="nvidia-smi"), \
+                mock.patch.object(sn.subprocess, "run", return_value=mock.Mock(stdout=smi)), \
+                mock.patch.object(sn, "cuda_gpus", return_value={"01:00.0": {"cuda": 0, "sms": 68}}):
+            a, b = sn.gpu_info()
+        self.assertEqual(("cuda" in a, a["max_clock_mhz"]), (False, None))
+        self.assertEqual((b["name"], b["cuda"], b["sms"], b["max_clock_mhz"], b["free_mib"]),
+                         ("RTX B", 0, 68, 2100, 9800))
+
+    def test_idle_kept_while_a_worker_runs(self):
+        w = sn.Workers({"bind": "x"})
+        self.assertEqual(w.note_idle([{"free_mib": 9000}], {"available_mib": 30000})["free_mib"], [9000])
+        with mock.patch.object(w, "running", return_value=[7841]):
+            idle = w.note_idle([{"free_mib": 500}], {"available_mib": 2000})
+        self.assertEqual((idle["free_mib"], idle["available_mib"]), ([9000], 30000))
+
+
 if __name__ == "__main__":
     unittest.main()
