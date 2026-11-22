@@ -34,6 +34,20 @@
       "method": "outlined GT Walsheim Pro Bold from public/fonts/GTWalsheimPro-Bold.woff2; recoloured for Strata Link: middle bar #34d399 -> #22d3ee"
     },
     {
+      "source": "logo/strata-mark-light.svg",
+      "source_sha256": "5e8be1beff8b552b17fcb0364481d077c8628339be5caffd1375228afb47dfe7",
+      "output": "brand/strata-net-lockup-light.svg",
+      "output_sha256": "621449de9edc56bbde982193188bbbae4940da363112abe65c6f0867b61d4b40",
+      "method": "Strata-Net README lockup, made by hand rather than by prepare-brand-assets.py: 'strata' and 'net' outlined from public/fonts/GTWalsheimPro-Bold.woff2 at the same size, tracking and kerning as strata-lockup, with the mark between them scaled by 0.7069 so it spans the x-height and sits on the baseline, 4.5 px from each word; middle bar #06b6d4"
+    },
+    {
+      "source": "logo/strata-mark-dark.svg",
+      "source_sha256": "1d10d244c6ea2209bd77a640b35609a644019d288fd2a83ad28bc858617d8e32",
+      "output": "brand/strata-net-lockup-dark.svg",
+      "output_sha256": "0d43a6e546412d04a9e8c32bcdf0c2678e5d3d83da6bfecd8d1d56ddbbab6a4b",
+      "method": "Strata-Net README lockup, made by hand rather than by prepare-brand-assets.py: 'strata' and 'net' outlined from public/fonts/GTWalsheimPro-Bold.woff2 at the same size, tracking and kerning as strata-lockup, with the mark between them scaled by 0.7069 so it spans the x-height and sits on the baseline, 4.5 px from each word; middle bar #22d3ee"
+    },
+    {
       "source": "web/favicon.svg",
       "source_sha256": "5b5f45f1a93ef05337569d2ea6932ae6b0bffb7b33c66446d7135d2f59c2f640",
       "output": "favicon.svg",
