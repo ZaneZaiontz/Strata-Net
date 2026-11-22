@@ -65,7 +65,9 @@ out, https://):
     GET  /log?port=P&lines=N   a worker's log tail (&prev=1: the last run that listened before this one,
                                stage-worker-P.prev.log)
     POST /sink                 reads the body; answers its bytes and the seconds it took (a link test toward here)
-    POST /send                 {"url": "https://other:7840", "mib": 64} - sends to another node's /sink
+    GET  /source?mib=N         answers N MiB (a link test from here)
+    POST /send                 {"url": "https://other:7840", "mib": 64, "pings": N?} - sends to another node's
+                               /sink; with "pings", also N round trips to its /ping ("ping_ms")
     POST /put?path=P&offset=N&total=T[&mode=755][&sha256=H]
                                writes the body at byte N of data_dir/P (a file of T bytes, sparse where nothing
                                was written) and answers the body's sha256; P.ranges.json records what is written
@@ -90,6 +92,7 @@ if sys.platform == "win32":
 import ctypes
 import functools
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -1136,6 +1139,16 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                                  "cpus": os.cpu_count(), "gpus": gpus, "ram": ram, "idle": workers.note_idle(gpus, ram),
                                  "workers": workers.running(), "ports": workers.ports(), "bind": cfg["bind"],
                                  "gpu_clocks": cfg.get("gpu_clocks"), "restart": bool(cfg.get("restart", True))})
+            elif u.path == "/source":
+                n = int(q.get("mib", ["64"])[0])
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(n << 20))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                mib = bytes(1 << 20)
+                for _ in range(n):
+                    self.wfile.write(mib)
             elif u.path == "/sha256":
                 try:
                     p = store.path(q["path"][0])
@@ -1209,7 +1222,10 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
             elif path == "/stop":
                 self.reply(200, {"ok": True, "stopped": workers.stop(req.get("port"))})
             elif path == "/send":
-                self.reply(200, send_test(req["url"], int(req.get("mib", 64)), cfg["_client_ctx"]))
+                r = send_test(req["url"], int(req.get("mib", 64)), cfg["_client_ctx"])
+                if req.get("pings"):
+                    r["ping_ms"] = ping_ms(req["url"], cfg["_client_ctx"], int(req["pings"]))
+                self.reply(200, r)
             elif path == "/service":   # one of node.json's named commands (opt-in "services")
                 code, body = services.run(req.get("name"), req.get("action"))
                 self.reply(code, body)
@@ -1230,6 +1246,24 @@ def send_test(url: str, mib: int, ctx: ssl.SSLContext) -> dict:
         got = json.load(r)
     s = time.perf_counter() - t0
     return {"ok": bool(got.get("ok")), "bytes": len(data), "seconds": s, "mb_s": len(data) / s / 1e6}
+
+
+def ping_ms(url: str, ctx: ssl.SSLContext, n: int) -> list[float]:
+    """`n` round trips to another node's /ping, each on a new connection timed from the request to the answer, so
+    the TCP and TLS handshakes before it are left out (an agent closes the connection after a /ping)."""
+    u = urlparse(agent_url(url))
+    times = []
+    for _ in range(n):
+        c = http.client.HTTPSConnection(u.netloc, timeout=30, context=ctx)
+        try:
+            c.connect()
+            t0 = time.perf_counter()
+            c.request("GET", u.path + "/ping")
+            c.getresponse().read()
+            times.append((time.perf_counter() - t0) * 1000)
+        finally:
+            c.close()
+    return times
 
 
 class TlsServer(ThreadingHTTPServer):

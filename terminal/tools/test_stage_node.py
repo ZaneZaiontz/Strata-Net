@@ -1347,5 +1347,56 @@ class GpuInfoTest(unittest.TestCase):
         self.assertEqual((idle["free_mib"], idle["available_mib"]), ([9000], 30000))
 
 
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class LinkTestTest(unittest.TestCase):
+    """stage_tune's link test both ways through an agent in this process (main -> a -> b, both the same agent)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.keydir = tempfile.TemporaryDirectory()
+        cls.keys = make_keys(Path(cls.keydir.name, "pc"), "pc")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.keydir.cleanup()
+
+    def nodes(self, old=False) -> list:
+        cfg = {"_tls": self.keys, "bind": "127.0.0.1", "_client_ctx": sn.tls_context(self.keys, False)}
+        base = sn.make_handler(cfg, sn.Workers(cfg), sn.Store(cfg))
+
+        class H(base):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_GET(self):
+                if old and self.path.startswith("/source"):
+                    self.reply(404, {"ok": False, "error": "unknown path"})
+                else:
+                    super().do_GET()
+
+        srv = sn.TlsServer(("127.0.0.1", 0), H, sn.tls_context(self.keys, True))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"https://127.0.0.1:{srv.server_address[1]}"
+        ctx = sn.tls_context(self.keys, False)
+        return [st.Node({"name": n, "agent": url, "host": "127.0.0.1"}, ctx) for n in ("a", "b")]
+
+    def test_both_ways_and_round_trips(self):
+        with mock.patch.object(st, "say"):
+            hops = st.measure_links(self.nodes(), mib=1, pings=3)
+        self.assertEqual([(h["from"], h["to"]) for h in hops], [("main", "a"), ("a", "b")])
+        for h in hops:
+            self.assertGreater(h["up_mb_s"], 0)
+            self.assertGreater(h["down_mb_s"], 0)
+            self.assertEqual(len(h["rtt_ms"]), 3)
+
+    def test_older_agent_has_no_way_back(self):
+        with mock.patch.object(st, "say"):
+            hops = st.measure_links(self.nodes(old=True), mib=1, pings=1)
+        self.assertIsNone(hops[0]["down_mb_s"])
+        self.assertGreater(hops[1]["down_mb_s"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -169,6 +169,55 @@ class Node:
     def log(self, lines: int = 4000) -> list[str]:
         return self.call(f"/log?port={self.port}&lines={lines}").get("log", [])
 
+    def fetch(self, path: str, base: str) -> bytes:
+        with self.opener.open(base + path, timeout=300) as r:
+            return r.read()
+
+
+def timed_mb_s(mib: int, fn) -> float | None:
+    """`mib` MiB over the seconds `fn` took (MB/s), None when it failed or answered false."""
+    t0 = time.perf_counter()
+    try:
+        ok = fn()
+    except (urllib.error.URLError, OSError):
+        return None
+    return (mib << 20) / (time.perf_counter() - t0) / 1e6 if ok else None
+
+
+def p90(xs: list[float]) -> float:
+    """The 90th percentile (nearest rank)."""
+    return sorted(xs)[max(0, -(-len(xs) * 9 // 10) - 1)]
+
+
+def measure_links(nodes: list[Node], mib: int = 64, pings: int = 20) -> list[dict]:
+    """main -> node 1 -> node 2 ...: each hop's throughput both ways (`mib` MiB through the agents' /sink, /source
+    and /send) and `pings` round trips, on the stage link's address when the agent answers there (node.json
+    agent_bind), else on the agent's own.  Per hop "up_mb_s" from the earlier PC, "down_mb_s" back to it and "rtt_ms";
+    None for what an agent older than this tool cannot measure."""
+    say("links:")
+    hops, prev, prev_base = [], None, None
+    for n in nodes:
+        on_stage = n.stage_agent == n.agent or n.call("/ping", timeout=5, base=n.stage_agent).get("ok")
+        base = n.stage_agent if on_stage else n.agent
+        if prev is None:
+            data = bytes(mib << 20)
+            up = timed_mb_s(mib, lambda: n.call("/sink", data=data, timeout=300, base=base).get("ok"))
+            down = timed_mb_s(mib, lambda: len(n.fetch(f"/source?mib={mib}", base)) == mib << 20)
+            rtt = stage_node.ping_ms(base, n.ctx, pings)
+            frm = "main"
+        else:
+            r = prev.call("/send", {"url": base, "mib": mib, "pings": pings}, timeout=300)
+            up, rtt = r.get("mb_s"), r.get("ping_ms")
+            down = n.call("/send", {"url": prev_base, "mib": mib}, timeout=300).get("mb_s")
+            frm = prev.name
+        where = "the stage link" if on_stage else (
+            f"the agent's address - the stage link to {n.host} is not measured (node.json agent_bind)")
+        trip = f"round trip {min(rtt):.1f} ms, 90% under {p90(rtt):.1f}" if rtt else "no round trip (an older agent)"
+        say(f"  {frm} -> {n.name}: {up or 0:.0f} MB/s, back {down or 0:.0f} MB/s, {trip} ({where})")
+        hops.append({"from": frm, "to": n.name, "up_mb_s": up, "down_mb_s": down, "rtt_ms": rtt})
+        prev, prev_base = n, base
+    return hops
+
 
 # ---------------------------------------------------------------- the main process (serve/server.py)
 class Main:
@@ -608,7 +657,7 @@ class Tuner:
                 f"{n.info.get('cpus')} CPUs")
         for x in self.node_notes():
             say("  note: " + x)
-        self.links()
+        measure_links(self.nodes)
         if self.search() is None:
             return None
         # the best few over the whole workload profile
@@ -641,34 +690,6 @@ class Tuner:
                 return r
             say(f"  does not read a {near}-token prompt: the next one")
         return None
-
-    def links(self) -> None:
-        """main -> node 1 -> node 2 ...: each hop's throughput (64 MiB through the agents) and round trip - on the
-        stage link's address when the agent answers there (node.json agent_bind), else on the agent's own."""
-        say("links:")
-        prev = None
-        for n in self.nodes:
-            on_stage = n.stage_agent == n.agent or n.call("/ping", timeout=5, base=n.stage_agent).get("ok")
-            base = n.stage_agent if on_stage else n.agent
-            t = []
-            for _ in range(5):
-                t0 = time.perf_counter()
-                n.call("/ping", timeout=30, base=base)
-                t.append((time.perf_counter() - t0) * 1000)
-            if prev is None:
-                data = b"\0" * (64 << 20)
-                t0 = time.perf_counter()
-                r = n.call("/sink", data=data, timeout=300, base=base)
-                mbs = len(data) / (time.perf_counter() - t0) / 1e6 if r.get("ok") else None
-                frm = "main"
-            else:
-                r = prev.call("/send", {"url": base, "mib": 64}, timeout=300)
-                mbs = r.get("mb_s")
-                frm = prev.name
-            where = "the stage link" if on_stage else (
-                f"the agent's address - the stage link to {n.host} is not measured (node.json agent_bind)")
-            say(f"  {frm} -> {n.name}: {mbs or 0:.0f} MB/s, round trip {min(t):.1f} ms ({where})")
-            prev = n
 
     def write(self, best: dict) -> None:
         main_cfg = self.main.config(best["splits"], best["chunk"], self.nodes[0], False, self.max_context,

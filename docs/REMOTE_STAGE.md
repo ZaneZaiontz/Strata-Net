@@ -667,8 +667,9 @@ python3 terminal/tools/stage_node.py node.json
   port, whether it runs, the restarts so far, the last exit
   (code, time) and the next start's time while one is pending (epoch seconds).
 - Other endpoints: `GET /ping`, `GET /info` (GPU with its SMs and highest clock, RAM, the clock setting, and in
-  `"idle"` the free VRAM and RAM last read while no worker of this agent ran), `POST /stop`, `GET /log`, `POST /sink`
-  and `POST /send` (a link test), `POST /put`, `GET /ranges`, `GET /sha256` (for `stage_ship.py`). A stop waits up
+  `"idle"` the free VRAM and RAM last read while no worker of this agent ran), `POST /stop`, `GET /log`, `POST /sink`,
+  `GET /source` and `POST /send` (a link test; `"pings": N` adds N round trips), `POST /put`, `GET /ranges`,
+  `GET /sha256` (for `stage_ship.py`). A stop waits up
   to 180 s for the worker to exit (a worker with ~30 GB of pinned experts takes more than 30 s to unpin).
 - `POST /service` (`{"name": NAME, "action": "start" | "stop" | "status"}`, opt-in): runs one of node.json's
   `"services"` - `{"NAME": {"start": [ARG, ...], "stop": [...], "status": [...], "timeout_s": 300}}` - and answers its
