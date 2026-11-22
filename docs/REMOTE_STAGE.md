@@ -550,8 +550,8 @@ What the measurements say (re-measure on your PCs; `terminal/tools/stage_tune.py
 
 `strata --plan-split FACTS` prints the split the planner (`engine/src/net/stage_split.cpp`, from StrataPool) picks
 for a set of PCs, as one line of JSON, and exits. It loads no model and touches no GPU, so it also runs on a PC
-without a GPU driver. **Nothing calls it on its own yet:** the server, the node agent and `stage_tune.py` still use
-the split you give them.
+without a GPU driver. `stage_tune.py plan` (below) gathers the facts and asks it, but nothing applies its answer
+yet: the server, the node agent and `stage_tune.py tune` still use the split you give them.
 
 FACTS is a text file of `key=value` words (`#` starts a comment line) and one `node=NAME ...` line per PC, the main
 PC first. Bytes are bytes, times are milliseconds, link speeds Mbit/s. An example for an RTX 3080 main and an
@@ -613,6 +613,57 @@ and last layer, its ms per window, cached experts and RAM), `window_ms`, `decode
 and the `inputs` it used. Exit 0 with a plan; 3 when nothing fits (the line says why); 2 on bad facts (stderr says
 what is wrong). The planner measures nothing: its estimate is only as good as `layer_ms`, `pf_layer_ms` and
 `window_tokens`, which come from real runs.
+
+### Gathering the facts (`stage_tune.py plan`)
+
+`python3 terminal/tools/stage_tune.py plan cluster.json FACTS` writes the facts file for the PCs of a cluster.json
+(the tuner's, below: this PC is the main, then the nodes in their order), runs `strata --plan-split FACTS` with the
+main's `exe` and prints the plan and its estimate. `--facts-only` stops after writing the file. It starts nothing and
+changes no config. Run it on the main PC with its server stopped: the main's VRAM and RAM are read there and then. A
+node's come from its agent's `/info` as they were the last time no worker of that agent ran.
+
+- **From the main config's files:** `layers`, `experts`, `slot_bytes` and `layer_arena_bytes` from the pack's
+  `native_experts.txt`; `profile` from `--expert-profile`; with `--kv-resident`, `layer_kv` (the full-attention
+  layers, from the GGUF's `full_attention_interval`).
+- **From each PC:** `vram_room`, the free VRAM of CUDA's first GPU less the entry's `vram_keep_mib`; `ram_room`, the
+  available RAM less its `ram_keep_mib`; `layer_ms` from the GPU's SMs (read from the driver) and the highest clock
+  nvidia-smi allows it, by the formula of the engine's own layer split. The engine's split takes CUDA's lower boost
+  clock instead; on the test pair that priced a layer about 23% higher and put the estimate further from the
+  measured speed.
+- **Measured on each pair of neighbours**, through their agents: 64 MiB each way (`up_mbit` and `down_mbit`, a PC's
+  best toward a neighbour) and 20 round trips with the handshakes left out, half their 90th percentile as `delay`.
+  On the test pair over 1 GbE that gave 937 and 887 Mbit/s and 0.36 ms; through `wan_proxy.py` set to 15 ms and
+  20 Mbit/s each way, 20 and 20 Mbit/s and 17.6 ms (the proxy itself adds 1 to 2 ms each way once its delay is on).
+- **Given in cluster.json**, since they need a real run:
+
+```json
+"main": {"config": "...", "exe": "...", "vram_keep_mib": 2978, "ram_keep_mib": 6144},
+"nodes": [{"name": "worker", "agent": "...", "host": "...", "vram_keep_mib": 956, "ram_keep_mib": 6144}],
+"plan": {"facts": {"window_tokens": 1.83, "window_rows": 2, "answer_tokens": 400, "miss_ms": 76,
+                   "session_base_bytes": 314572800, "session_layer_bytes": 110773898},
+         "node_facts": {"kv_host_layer": 276488519},
+         "calib": "windows=384 fixed_ms=17.1 net_ms=3.7 scale=0.705,0.705 seen=30"}
+```
+
+  - `vram_keep_mib`: what the engine reserves, from its line `expert cache auto: ... N MiB reserved (+N MiB for the
+    draft head, +N MiB for what is allocated after the cache)`, and on the main also the drafter (`draft layer
+    loaded, N MiB of VRAM`) and the head (about 410 MiB for this model family). On the test pair 700 + 256 on the
+    worker and 1259 + 218 + 256 + 835 + 410 on the main.
+  - `ram_keep_mib`: what the engine takes besides its experts and K/V copies, plus a margin (see `ram_room` above).
+  - `session_base_bytes` and `session_layer_bytes`: a range's VRAM besides its experts. On a worker that is its
+    idle free VRAM less the free VRAM in its `expert cache auto` line; on the test worker 2,202 MiB for 18 layers,
+    taken as 300 MiB plus 105.6 MiB a layer.
+  - `kv_host_layer`: the line `KV streaming: ... the K/V in N GiB of pinned RAM` over the full-attention layers of
+    that PC's range (1.80 GiB over 7 on the test main).
+  - `window_tokens`, `window_rows`, `miss_ms` and `calib`, as described above.
+
+  Everything in `"facts"` is written as given and wins over what was gathered, as does a PC entry's own `"facts"`
+  (`layer_ms`, for one).
+
+On the test pair it wrote the hand-made file behind the example above, except for the links it measured (937 and 887
+Mbit/s where 941 was assumed, 0.36 ms against 0.2) and the free memory of the day (within 0.2%), and the planner
+gave the same split at 31 with 33.5 ms a window against 33.1. Where an agent is older than the tool (no `idle` or
+GPU speed in `/info`, no `/source`, no round trips from `/send`) it stops and names that agent: update it.
 
 ## Tools
 
