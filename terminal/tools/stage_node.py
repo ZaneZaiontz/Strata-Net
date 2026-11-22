@@ -274,6 +274,56 @@ def check_services(value) -> dict:
     return out
 
 
+class WindowsJob:
+    """A job object holding a command started with CREATE_SUSPENDED and every process it starts, from the first one on,
+    so that kill() ends them all.  taskkill /T walks a snapshot of the tree: a child started while it runs outlives it.
+    Not kill-on-close, so what a command leaves running when it ends in time lives on; a daemon can leave the job with
+    CREATE_BREAKAWAY_FROM_JOB, as one leaves the process group with setsid on POSIX.  Jobs nest since Windows 8, so the
+    agent may run in a job of its own.  OSError (and the command ended) when the job cannot be made."""
+
+    CREATE_SUSPENDED = 0x4
+
+    def __init__(self, p: subprocess.Popen):
+        import ctypes
+        from ctypes import wintypes
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [("time_limits", ctypes.c_int64 * 2), ("flags", wintypes.DWORD),
+                        ("working_set", ctypes.c_size_t * 2), ("processes", wintypes.DWORD),
+                        ("affinity", ctypes.c_size_t), ("classes", wintypes.DWORD * 2),
+                        ("io_counters", ctypes.c_uint64 * 6), ("memory", ctypes.c_size_t * 4)]
+
+        EXTENDED_LIMIT_INFORMATION, LIMIT_BREAKAWAY_OK = 9, 0x800
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateJobObjectW.restype = wintypes.HANDLE
+        k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        self.k32, self.job = k32, k32.CreateJobObjectW(None, None)
+        limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION(flags=LIMIT_BREAKAWAY_OK)
+        if not (self.job and k32.SetInformationJobObject(self.job, EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits),
+                                                         ctypes.sizeof(limits))
+                and k32.AssignProcessToJobObject(self.job, int(p._handle))):
+            e = ctypes.WinError(ctypes.get_last_error())
+            p.kill()
+            self.close()
+            raise e
+        ctypes.WinDLL("ntdll").NtResumeProcess(wintypes.HANDLE(int(p._handle)))
+
+    def kill(self):
+        """End every process in the job."""
+        import ctypes
+
+        if not self.k32.TerminateJobObject(self.job, 1):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+    def close(self):
+        """Let go of the job; the processes still in it run on."""
+        if self.job:
+            self.k32.CloseHandle(self.job)
+
+
 class Services:
     """node.json's named commands, one run at a time.  The output goes to a temporary file, not a pipe: a command
     that leaves a daemon behind (setsid nohup) would otherwise keep the pipe open and the answer would never come."""
@@ -298,21 +348,23 @@ class Services:
                     # its own process group: a timeout ends what it started and still waits for (not a daemon it
                     # detached with setsid, which has a session of its own)
                     kw = {"start_new_session": True} if os.name != "nt" else \
-                        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+                        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | WindowsJob.CREATE_SUSPENDED}
                     p = subprocess.Popen(s[action], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **kw)
+                    job = WindowsJob(p) if os.name == "nt" else None
                     try:
                         rc, err = p.wait(timeout=s["timeout_s"]), None
                     except subprocess.TimeoutExpired:
                         rc, err = None, f"did not finish in {s['timeout_s']:g} s"
                         try:
-                            if os.name != "nt":
+                            if job is None:
                                 os.killpg(p.pid, signal.SIGKILL)
                             else:
-                                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True,
-                                               timeout=30)
-                        except (OSError, subprocess.SubprocessError):
+                                job.kill()
+                        except OSError:
                             p.kill()
                         p.wait()
+                    if job is not None:
+                        job.close()
                 except OSError as e:
                     rc, err = None, f"could not run: {e}"
                 size = out.seek(0, os.SEEK_END)                  # the tail: the last 4 MiB, not the first
