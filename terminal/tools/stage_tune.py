@@ -5,6 +5,11 @@ prompt chunk, and writes the configs that run them.
     python3 tools/stage_tune.py tune  cluster.json OUTDIR     measure, search, write OUTDIR/{main.json,nodes.json,report.md}
     python3 tools/stage_tune.py apply cluster.json OUTDIR     start the nodes' workers as OUTDIR/nodes.json says
                                                               (then serve OUTDIR/main.json as any config)
+    python3 tools/stage_tune.py plan  cluster.json FACTS [--facts-only]
+                                                              gather the facts for strata --plan-split from the
+                                                              agents and run it (needs each PC's "vram_keep_mib",
+                                                              "ram_keep_mib" and the "plan" block: docs/REMOTE_STAGE.md,
+                                                              "Gathering the facts")
 
 cluster.json:
     {
@@ -743,6 +748,121 @@ class Tuner:
         (self.outdir / "report.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+# ---------------------------------------------------------------- split facts for `strata --plan-split`
+def layer_ms(gpu: dict) -> float:
+    """GPU time per layer per decode window by the engine's layer-split formula (generate.cpp: 0.33 ms on 84 SMs at
+    2.617 GHz, the less the more SMs x clock), with the highest clock nvidia-smi allows the card.  The engine takes
+    CUDA's clock rate, the lower boost clock, which put the estimate further from the measured speed."""
+    return round(0.33 * 84.0 * 2.617 / max(1.0, gpu["sms"] * gpu["max_clock_mhz"] / 1e3), 4)
+
+
+def qsa_interval(native: str) -> int:
+    """Every how many layers one is full attention, from the GGUF's full_attention_interval (the engine's 4 when it
+    has none)."""
+    from gguf_reader import GGUFFile
+    meta = GGUFFile(Path(native)).metadata
+    return next((v for k, v in meta.items() if k.endswith(".full_attention_interval") and isinstance(v, int)), 4)
+
+
+def model_facts(args: list) -> dict:
+    """The model facts the main config's files give: the layers, each layer's cache slot (its expert blob, rounded
+    up to 256 bytes as the engine does) and its experts' arena from the pack's native_experts.txt, the expert
+    profile, and with --kv-resident the layers whose K/V a node keeps a pinned copy of (the full-attention ones)."""
+    pack = arg_value(args, "--pack")
+    if not pack:
+        sys.exit("stage_tune: the main config names no --pack (the planner reads the experts' sizes from it)")
+    lines = (Path(pack) / "native_experts.txt").read_text(encoding="utf-8").splitlines()
+    n_expert = int(re.search(r"n_expert (\d+)", lines[0]).group(1))
+    blobs = [int(x.split()[4]) for x in lines[1:] if x.strip() and not x.startswith("#")]
+    f = {"layers": len(blobs), "experts": n_expert}
+    if arg_value(args, "--expert-profile"):
+        f["profile"] = arg_value(args, "--expert-profile")
+    f["slot_bytes"] = ",".join(str((b + 255) // 256 * 256) for b in blobs)
+    f["layer_arena_bytes"] = ",".join(str(b * n_expert) for b in blobs)
+    if "--kv-resident" in args:
+        i = qsa_interval(arg_value(args, "--native"))
+        f["layer_kv"] = ",".join("1" if layer % i == i - 1 else "0" for layer in range(len(blobs)))
+    return f
+
+
+def pc_facts(name: str, info: dict, spec: dict) -> dict:
+    """A PC's own facts from its /info (this PC's read here) and its cluster.json entry: the free VRAM of CUDA's first
+    GPU and the available RAM while no worker ran, less the entry's vram_keep_mib and ram_keep_mib, and the GPU's
+    layer_ms (unless the entry's "facts" give one)."""
+    missing = [k for k in ("vram_keep_mib", "ram_keep_mib") if k not in spec]
+    if missing:
+        sys.exit(f"stage_tune: {name}: cluster.json gives no {' or '.join(missing)}")
+    gpus, idle = info.get("gpus") or [], info.get("idle")
+    gpu = next((g for g in gpus if g.get("cuda") == 0 and g.get("max_clock_mhz")), None)
+    if not idle or gpu is None:
+        sys.exit(f"stage_tune: {name}'s agent reports no " + ("idle memory" if not idle else "CUDA GPU speed")
+                 + " (an agent older than this tool, or no NVIDIA driver): update it")
+    f = {"vram_room": int((idle["free_mib"][gpus.index(gpu)] - spec["vram_keep_mib"]) * 2**20),
+         "ram_room": int((idle["available_mib"] - spec["ram_keep_mib"]) * 2**20)}
+    if "layer_ms" not in spec.get("facts", {}):
+        f["layer_ms"] = layer_ms(gpu)
+    return f
+
+
+def link_facts(hops: list[dict]) -> dict[str, dict]:
+    """Each PC's link facts from the measured hops: its upload and download in Mbit/s, the best it reached toward a
+    neighbour (the planner prices a crossing at the slower of the sender's upload and the receiver's download), and
+    the one-way delay to its next PC, half the 90th percentile of their round trips."""
+    f: dict[str, dict] = collections.defaultdict(dict)
+    for h in hops:
+        missing = [k for k in ("up_mb_s", "down_mb_s", "rtt_ms") if not h.get(k)]
+        if missing:
+            sys.exit(f"stage_tune: {h['from']} -> {h['to']}: no {', '.join(missing)} measured (an agent older than "
+                     "this tool? update it)")
+        for pc, key, mb_s in ((h["from"], "up_mbit", h["up_mb_s"]), (h["to"], "down_mbit", h["up_mb_s"]),
+                              (h["to"], "up_mbit", h["down_mb_s"]), (h["from"], "down_mbit", h["down_mb_s"])):
+            f[pc][key] = max(f[pc].get(key, 0), round(mb_s * 8))
+        f[h["from"]]["delay"] = f"{h['to']}:{p90(h['rtt_ms']) / 2:.2f}"
+    return f
+
+
+def plan(cluster: dict, out: Path, facts_only: bool) -> None:
+    """Writes the planner's facts - the model's from the main config's files, this PC's (the main) read here now,
+    each node's from its agent, the links measured, and what cluster.json's "plan" gives - then, unless
+    `facts_only`, runs `strata --plan-split` on them and prints its plan and estimate."""
+    ctx = stage_node.client_context(stage_node.tls_dir(cluster.get("tls_dir"), "stage_tune"), "stage_tune")
+    nodes = [Node(n, ctx) for n in cluster["nodes"]]
+    main, given = cluster["main"], cluster.get("plan", {})
+    gpus, ram = stage_node.gpu_info(), stage_node.ram_info()
+    pcs = [("main", {"gpus": gpus, "idle": stage_node.idle_reading(gpus, ram)}, main)]
+    for n, spec in zip(nodes, cluster["nodes"]):
+        info = n.call("/info", timeout=30)
+        if not info.get("ok"):
+            sys.exit(f"stage_tune: {n.name} ({n.agent}) does not answer: {info.get('error')}")
+        pcs.append((n.name, info, spec))
+    links = link_facts(measure_links(nodes))
+    args = json.loads(Path(main["config"]).read_text(encoding="utf-8"))["args"]
+    lines = [f"{k}={v}" for k, v in {**model_facts(args), **given.get("facts", {})}.items()]
+    if given.get("calib"):
+        lines.append("calib " + given["calib"])
+    for name, info, spec in pcs:
+        f = {**pc_facts(name, info, spec), **given.get("node_facts", {}), **links.get(name, {}),
+             **spec.get("facts", {})}
+        lines.append(f"node={name} " + " ".join(f"{k}={v}" for k, v in f.items()))
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    say(f"facts: {out}")
+    if facts_only:
+        return
+    r = subprocess.run([main["exe"], "--plan-split", str(out)], capture_output=True, text=True)
+    sys.stderr.write(r.stderr)
+    if r.stdout.strip():
+        res = json.loads(r.stdout)
+        if res["ok"]:
+            say("plan: " + ", ".join(f"{x['name']} layers {x['first']}-{x['last']}" for x in res["nodes"])
+                + f" (--layer-split {','.join(map(str, res['at']))})")
+            say(f"estimate: {res['window_ms']:.1f} ms a window, {res['decode_tok_s']:.1f} tok/s, a request "
+                f"{res['request_ms'] / 1000:.1f} s")
+        else:
+            say("no plan: " + res["why"])
+        print(r.stdout.strip())
+    sys.exit(r.returncode)
+
+
 def apply(cluster: dict, outdir: Path) -> None:
     ctx = stage_node.client_context(stage_node.tls_dir(cluster.get("tls_dir"), "stage_tune"), "stage_tune")
     nodes = json.loads((outdir / "nodes.json").read_text(encoding="utf-8"))
@@ -758,6 +878,9 @@ def apply(cluster: dict, outdir: Path) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["plan"] and len(sys.argv) in (4, 5) and sys.argv[4:] in ([], ["--facts-only"]):
+        plan(json.loads(Path(sys.argv[2]).read_text(encoding="utf-8")), Path(sys.argv[3]), len(sys.argv) == 5)
+        return
     if len(sys.argv) != 4 or sys.argv[1] not in ("tune", "apply"):
         sys.exit(__doc__)
     cluster = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))

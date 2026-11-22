@@ -1398,5 +1398,46 @@ class LinkTestTest(unittest.TestCase):
         self.assertGreater(hops[1]["down_mb_s"], 0)
 
 
+class PlanFactsTest(unittest.TestCase):
+    """stage_tune plan's facts: the model's from the pack, a PC's from its /info, the links' from the hops."""
+
+    def test_model_from_the_pack(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "native_experts.txt").write_text(
+                "# strata native experts v4: layer ... (n_expert 4, total 12000; ...)\n"
+                "0 18 6 0 1000 1 2 3 s.gguf\n1 18 6 4000 1024 1 2 3 s.gguf\n2 18 6 8096 2000 1 2 3 s.gguf\n")
+            args = ["--pack", d, "--native", "m.gguf", "--expert-profile", "/p.bin", "--kv-resident", "32768"]
+            with mock.patch.object(st, "qsa_interval", return_value=2):
+                f = st.model_facts(args)
+            self.assertNotIn("layer_kv", st.model_facts(args[:6]))
+        self.assertEqual(f, {"layers": 3, "experts": 4, "profile": "/p.bin", "slot_bytes": "1024,1024,2048",
+                             "layer_arena_bytes": "4000,4096,8000", "layer_kv": "0,1,0"})
+
+    def test_pc_from_its_info(self):
+        info = {"gpus": [{"cuda": 1, "sms": 46, "max_clock_mhz": 2100, "free_mib": 7900},
+                         {"cuda": 0, "sms": 68, "max_clock_mhz": 2100, "free_mib": 9800}],
+                "idle": {"free_mib": [7900, 9800], "available_mib": 60000}}
+        f = st.pc_facts("main", info, {"vram_keep_mib": 800, "ram_keep_mib": 6144})
+        self.assertEqual(f, {"vram_room": 9000 << 20, "ram_room": (60000 - 6144) << 20, "layer_ms": 0.508})
+        self.assertNotIn("layer_ms", st.pc_facts("main", info, {"vram_keep_mib": 0, "ram_keep_mib": 0,
+                                                                "facts": {"layer_ms": 0.3}}))
+        with self.assertRaisesRegex(SystemExit, "no idle memory .* update it"):
+            st.pc_facts("w", {"gpus": info["gpus"]}, {"vram_keep_mib": 0, "ram_keep_mib": 0})
+        with self.assertRaisesRegex(SystemExit, "no CUDA GPU speed"):
+            st.pc_facts("w", {"gpus": [{"free_mib": 1}], "idle": info["idle"]}, {"vram_keep_mib": 0, "ram_keep_mib": 0})
+        with self.assertRaisesRegex(SystemExit, "no ram_keep_mib"):
+            st.pc_facts("w", info, {"vram_keep_mib": 0})
+
+    def test_links_from_the_hops(self):
+        hops = [{"from": "main", "to": "a", "up_mb_s": 117.6, "down_mb_s": 112.5, "rtt_ms": [0.5] * 9 + [3.0]},
+                {"from": "a", "to": "b", "up_mb_s": 2.5, "down_mb_s": 2.4, "rtt_ms": [30.0, 31.0, 40.0]}]
+        f = st.link_facts(hops)
+        self.assertEqual(f["main"], {"up_mbit": 941, "down_mbit": 900, "delay": "a:0.25"})
+        self.assertEqual(f["a"], {"down_mbit": 941, "up_mbit": 900, "delay": "b:20.00"})
+        self.assertEqual(f["b"], {"down_mbit": 20, "up_mbit": 19})
+        with self.assertRaisesRegex(SystemExit, "main -> a: no down_mb_s measured"):
+            st.link_facts([dict(hops[0], down_mb_s=None)])
+
+
 if __name__ == "__main__":
     unittest.main()
