@@ -515,7 +515,7 @@ class MonitorTest(LogCase):
         self.agents = []
 
     def tearDown(self):
-        for a in self.agents:
+        for a in reversed(self.agents):
             a.close()
         super().tearDown()
 

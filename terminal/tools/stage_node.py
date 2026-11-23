@@ -51,8 +51,10 @@ keeps them (a faster restart with the same layers).
 The workers get the folder as STRATA_STAGE_TLS, so they accept the same main processes.  Endpoints (JSON in and
 out, https://):
     GET  /ping                 {"ok": true}: a round trip with no work behind it
-    GET  /info                 the GPU (nvidia-smi), RAM, CPU and the workers running here; "ports": each port's
-                               worker - running, restarts so far, its last exit (code, time) and the next start's time
+    GET  /info                 the GPU (nvidia-smi; with the driver also its CUDA index and SMs), RAM, CPU
+                               and the workers running here; "idle": the free VRAM and RAM last read while no worker
+                               of this agent ran; "ports": each port's worker - running, restarts so far, its last
+                               exit (code, time) and the next start's time
     POST /start                {"begin": K, "end": K2?, "next": "host:port"?, "port": 7841, "prefill": 5888,
                                 "cache": "auto"|slots, "extra": [...], "model"?: {"dir": D, "native": F, "pack": P,
                                 "profile"?: R, "ple"?: G}, "session_dir"?: true}
@@ -63,7 +65,9 @@ out, https://):
     GET  /log?port=P&lines=N   a worker's log tail (&prev=1: the last run that listened before this one,
                                stage-worker-P.prev.log)
     POST /sink                 reads the body; answers its bytes and the seconds it took (a link test toward here)
-    POST /send                 {"url": "https://other:7840", "mib": 64} - sends to another node's /sink
+    GET  /source?mib=N         answers N MiB (a link test from here)
+    POST /send                 {"url": "https://other:7840", "mib": 64, "pings": N?} - sends to another node's
+                               /sink; with "pings", also N round trips to its /ping ("ping_ms")
     POST /put?path=P&offset=N&total=T[&mode=755][&sha256=H]
                                writes the body at byte N of data_dir/P (a file of T bytes, sparse where nothing
                                was written) and answers the body's sha256; P.ranges.json records what is written
@@ -85,7 +89,10 @@ import sys
 if sys.platform == "win32":
     sys.modules["_wmi"] = None
 
+import ctypes
+import functools
 import hashlib
+import http.client
 import json
 import os
 import platform
@@ -417,11 +424,40 @@ def load_config(path: str) -> dict:
     return cfg
 
 
+def bus_key(bus_id: str) -> str:
+    """A PCI address without its domain, lower case: nvidia-smi writes the domain with 8 digits, CUDA with 4."""
+    return bus_id.split(":", 1)[-1].lower()
+
+
+@functools.lru_cache(maxsize=1)
+def cuda_gpus() -> dict[str, dict]:
+    """Each GPU's place in CUDA's order and its SM count, from the driver as the engine reads them (no context is
+    made, so no VRAM is taken), by PCI address; {} without a driver."""
+    try:
+        cu = ctypes.CDLL("nvcuda.dll" if os.name == "nt" else "libcuda.so.1")
+    except OSError:
+        return {}
+    n = ctypes.c_int()
+    if cu.cuInit(0) != 0 or cu.cuDeviceGetCount(ctypes.byref(n)) != 0:
+        return {}
+    gpus = {}
+    for i in range(n.value):
+        dev, sms, bus = ctypes.c_int(), ctypes.c_int(), ctypes.create_string_buffer(32)
+        if (cu.cuDeviceGet(ctypes.byref(dev), i) or cu.cuDeviceGetAttribute(ctypes.byref(sms), 16, dev)
+                or cu.cuDeviceGetPCIBusId(bus, 32, dev)):
+            continue
+        gpus[bus_key(bus.value.decode())] = {"cuda": i, "sms": sms.value}
+    return gpus
+
+
 def gpu_info() -> list[dict]:
+    """nvidia-smi's GPUs (with the highest SM clock it allows, MHz), each with its CUDA index and SMs (cuda_gpus)
+    when the driver gives them."""
     smi = shutil.which("nvidia-smi")
     if smi is None:
         return []
-    q = "name,memory.total,memory.free,memory.used,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max"
+    q = ("name,memory.total,memory.free,memory.used,pcie.link.gen.max,pcie.link.width.current,pcie.link.width.max,"
+         "pci.bus_id,clocks.max.sm")
     try:
         out = subprocess.run([smi, f"--query-gpu={q}", "--format=csv,noheader,nounits"], capture_output=True,
                              text=True, timeout=20).stdout
@@ -430,11 +466,17 @@ def gpu_info() -> list[dict]:
     gpus = []
     for line in out.strip().splitlines():
         f = [x.strip() for x in line.split(",")]
-        if len(f) < 7:
+        if len(f) < 9:
             continue
         gpus.append({"name": f[0], "vram_mib": int(f[1]), "free_mib": int(f[2]), "used_mib": int(f[3]),
-                     "pcie_gen": f[4], "pcie_width": f[5], "pcie_width_max": f[6]})
+                     "pcie_gen": f[4], "pcie_width": f[5], "pcie_width_max": f[6],
+                     "max_clock_mhz": int(f[8]) if f[8].isdigit() else None, **cuda_gpus().get(bus_key(f[7]), {})})
     return gpus
+
+
+def idle_reading(gpus: list[dict], ram: dict) -> dict:
+    """Free VRAM per GPU (in gpu_info's order) and available RAM, as /info's "idle" gives them."""
+    return {"free_mib": [g["free_mib"] for g in gpus], "available_mib": ram.get("available_mib"), "at": time.time()}
 
 
 def ram_info() -> dict:
@@ -487,6 +529,7 @@ class Workers:
         # whether a port's log is of a run that listened (only those become .prev.log; a log from before this agent
         # counts as one); under start_lock, as every _start
         self.listened: dict[int, bool] = {}
+        self.idle: dict = {}
 
     def log_path(self, port: int, prev: bool = False) -> Path:
         return Path(self.cfg.get("log_dir", ".")) / f"stage-worker-{port}{'.prev' if prev else ''}.log"
@@ -845,6 +888,13 @@ class Workers:
         with self.lock:
             return [p for p, proc in self.procs.items() if proc.poll() is None]
 
+    def note_idle(self, gpus: list[dict], ram: dict) -> dict:
+        """/info's "idle": the free VRAM and RAM last read while no worker of this agent ran (a running worker hides
+        what a planner needs); {} until then."""
+        if not self.running():
+            self.idle = idle_reading(gpus, ram)
+        return self.idle
+
 
 def tail(text: str, n: int) -> list[str]:
     return text.splitlines()[-n:]
@@ -1084,10 +1134,21 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                 self.reply(200, {"ok": True})
             elif u.path == "/info":
                 workers.reap()
+                gpus, ram = gpu_info(), ram_info()
                 self.reply(200, {"ok": True, "host": platform.node(), "system": platform.platform(),
-                                 "cpus": os.cpu_count(), "gpus": gpu_info(), "ram": ram_info(),
+                                 "cpus": os.cpu_count(), "gpus": gpus, "ram": ram, "idle": workers.note_idle(gpus, ram),
                                  "workers": workers.running(), "ports": workers.ports(), "bind": cfg["bind"],
                                  "gpu_clocks": cfg.get("gpu_clocks"), "restart": bool(cfg.get("restart", True))})
+            elif u.path == "/source":
+                n = int(q.get("mib", ["64"])[0])
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Length", str(n << 20))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                mib = bytes(1 << 20)
+                for _ in range(n):
+                    self.wfile.write(mib)
             elif u.path == "/sha256":
                 try:
                     p = store.path(q["path"][0])
@@ -1161,7 +1222,10 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
             elif path == "/stop":
                 self.reply(200, {"ok": True, "stopped": workers.stop(req.get("port"))})
             elif path == "/send":
-                self.reply(200, send_test(req["url"], int(req.get("mib", 64)), cfg["_client_ctx"]))
+                r = send_test(req["url"], int(req.get("mib", 64)), cfg["_client_ctx"])
+                if req.get("pings"):
+                    r["ping_ms"] = ping_ms(req["url"], cfg["_client_ctx"], int(req["pings"]))
+                self.reply(200, r)
             elif path == "/service":   # one of node.json's named commands (opt-in "services")
                 code, body = services.run(req.get("name"), req.get("action"))
                 self.reply(code, body)
@@ -1182,6 +1246,24 @@ def send_test(url: str, mib: int, ctx: ssl.SSLContext) -> dict:
         got = json.load(r)
     s = time.perf_counter() - t0
     return {"ok": bool(got.get("ok")), "bytes": len(data), "seconds": s, "mb_s": len(data) / s / 1e6}
+
+
+def ping_ms(url: str, ctx: ssl.SSLContext, n: int) -> list[float]:
+    """`n` round trips to another node's /ping, each on a new connection timed from the request to the answer, so
+    the TCP and TLS handshakes before it are left out (an agent closes the connection after a /ping)."""
+    u = urlparse(agent_url(url))
+    times = []
+    for _ in range(n):
+        c = http.client.HTTPSConnection(u.netloc, timeout=30, context=ctx)
+        try:
+            c.connect()
+            t0 = time.perf_counter()
+            c.request("GET", u.path + "/ping")
+            c.getresponse().read()
+            times.append((time.perf_counter() - t0) * 1000)
+        finally:
+            c.close()
+    return times
 
 
 class TlsServer(ThreadingHTTPServer):
@@ -1205,6 +1287,7 @@ def main() -> None:
     addr = cfg.get("agent_bind") or cfg["bind"]
     srv = TlsServer((addr, int(cfg.get("agent_port", 7840))), make_handler(cfg, workers, Store(cfg)),
                     cfg["_server_ctx"])
+    workers.note_idle(gpu_info(), ram_info())
     cert = ssl.PEM_cert_to_DER_cert((cfg["_tls"] / "cert.pem").read_text(encoding="ascii"))
     n = accepted_certs(cfg["_tls"]).count("-----BEGIN CERTIFICATE-----")
     sys.stderr.write(f"stage_node: listening on https://{addr}:{cfg.get('agent_port', 7840)} (TLS 1.3: this PC is "

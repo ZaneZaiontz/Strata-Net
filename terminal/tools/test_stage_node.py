@@ -1325,5 +1325,119 @@ class NodePathsTest(unittest.TestCase):
         self.assertEqual(p["expert_profile"], "D:\\stage\\data\\prof.bin")
 
 
+class GpuInfoTest(unittest.TestCase):
+    """/info's GPU speed (matched to nvidia-smi's GPUs by PCI address) and its idle memory."""
+
+    def test_speed_by_bus_address(self):
+        smi = ("RTX A, 12227, 11735, 492, 5, 16, 16, 00000000:02:00.0, [N/A]\n"
+               "RTX B, 10240, 9800, 440, 4, 16, 16, 00000000:01:00.0, 2100\n")
+        with mock.patch.object(sn.shutil, "which", return_value="nvidia-smi"), \
+                mock.patch.object(sn.subprocess, "run", return_value=mock.Mock(stdout=smi)), \
+                mock.patch.object(sn, "cuda_gpus", return_value={"01:00.0": {"cuda": 0, "sms": 68}}):
+            a, b = sn.gpu_info()
+        self.assertEqual(("cuda" in a, a["max_clock_mhz"]), (False, None))
+        self.assertEqual((b["name"], b["cuda"], b["sms"], b["max_clock_mhz"], b["free_mib"]),
+                         ("RTX B", 0, 68, 2100, 9800))
+
+    def test_idle_kept_while_a_worker_runs(self):
+        w = sn.Workers({"bind": "x"})
+        self.assertEqual(w.note_idle([{"free_mib": 9000}], {"available_mib": 30000})["free_mib"], [9000])
+        with mock.patch.object(w, "running", return_value=[7841]):
+            idle = w.note_idle([{"free_mib": 500}], {"available_mib": 2000})
+        self.assertEqual((idle["free_mib"], idle["available_mib"]), ([9000], 30000))
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class LinkTestTest(unittest.TestCase):
+    """stage_tune's link test both ways through an agent in this process (main -> a -> b, both the same agent)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.keydir = tempfile.TemporaryDirectory()
+        cls.keys = make_keys(Path(cls.keydir.name, "pc"), "pc")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.keydir.cleanup()
+
+    def nodes(self, old=False) -> list:
+        cfg = {"_tls": self.keys, "bind": "127.0.0.1", "_client_ctx": sn.tls_context(self.keys, False)}
+        base = sn.make_handler(cfg, sn.Workers(cfg), sn.Store(cfg))
+
+        class H(base):
+            def log_message(self, fmt, *args):
+                pass
+
+            def do_GET(self):
+                if old and self.path.startswith("/source"):
+                    self.reply(404, {"ok": False, "error": "unknown path"})
+                else:
+                    super().do_GET()
+
+        srv = sn.TlsServer(("127.0.0.1", 0), H, sn.tls_context(self.keys, True))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        url = f"https://127.0.0.1:{srv.server_address[1]}"
+        ctx = sn.tls_context(self.keys, False)
+        return [st.Node({"name": n, "agent": url, "host": "127.0.0.1"}, ctx) for n in ("a", "b")]
+
+    def test_both_ways_and_round_trips(self):
+        with mock.patch.object(st, "say"):
+            hops = st.measure_links(self.nodes(), mib=1, pings=3)
+        self.assertEqual([(h["from"], h["to"]) for h in hops], [("main", "a"), ("a", "b")])
+        for h in hops:
+            self.assertGreater(h["up_mb_s"], 0)
+            self.assertGreater(h["down_mb_s"], 0)
+            self.assertEqual(len(h["rtt_ms"]), 3)
+
+    def test_older_agent_has_no_way_back(self):
+        with mock.patch.object(st, "say"):
+            hops = st.measure_links(self.nodes(old=True), mib=1, pings=1)
+        self.assertIsNone(hops[0]["down_mb_s"])
+        self.assertGreater(hops[1]["down_mb_s"], 0)
+
+
+class PlanFactsTest(unittest.TestCase):
+    """stage_tune plan's facts: the model's from the pack, a PC's from its /info, the links' from the hops."""
+
+    def test_model_from_the_pack(self):
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "native_experts.txt").write_text(
+                "# strata native experts v4: layer ... (n_expert 4, total 12000; ...)\n"
+                "0 18 6 0 1000 1 2 3 s.gguf\n1 18 6 4000 1024 1 2 3 s.gguf\n2 18 6 8096 2000 1 2 3 s.gguf\n")
+            args = ["--pack", d, "--native", "m.gguf", "--expert-profile", "/p.bin", "--kv-resident", "32768"]
+            with mock.patch.object(st, "qsa_interval", return_value=2):
+                f = st.model_facts(args)
+            self.assertNotIn("layer_kv", st.model_facts(args[:6]))
+        self.assertEqual(f, {"layers": 3, "experts": 4, "profile": "/p.bin", "slot_bytes": "1024,1024,2048",
+                             "layer_arena_bytes": "4000,4096,8000", "layer_kv": "0,1,0"})
+
+    def test_pc_from_its_info(self):
+        info = {"gpus": [{"cuda": 1, "sms": 46, "max_clock_mhz": 2100, "free_mib": 7900},
+                         {"cuda": 0, "sms": 68, "max_clock_mhz": 2100, "free_mib": 9800}],
+                "idle": {"free_mib": [7900, 9800], "available_mib": 60000}}
+        f = st.pc_facts("main", info, {"vram_keep_mib": 800, "ram_keep_mib": 6144})
+        self.assertEqual(f, {"vram_room": 9000 << 20, "ram_room": (60000 - 6144) << 20, "layer_ms": 0.508})
+        self.assertNotIn("layer_ms", st.pc_facts("main", info, {"vram_keep_mib": 0, "ram_keep_mib": 0,
+                                                                "facts": {"layer_ms": 0.3}}))
+        with self.assertRaisesRegex(SystemExit, "no idle memory .* update it"):
+            st.pc_facts("w", {"gpus": info["gpus"]}, {"vram_keep_mib": 0, "ram_keep_mib": 0})
+        with self.assertRaisesRegex(SystemExit, "no CUDA GPU speed"):
+            st.pc_facts("w", {"gpus": [{"free_mib": 1}], "idle": info["idle"]}, {"vram_keep_mib": 0, "ram_keep_mib": 0})
+        with self.assertRaisesRegex(SystemExit, "no ram_keep_mib"):
+            st.pc_facts("w", info, {"vram_keep_mib": 0})
+
+    def test_links_from_the_hops(self):
+        hops = [{"from": "main", "to": "a", "up_mb_s": 117.6, "down_mb_s": 112.5, "rtt_ms": [0.5] * 9 + [3.0]},
+                {"from": "a", "to": "b", "up_mb_s": 2.5, "down_mb_s": 2.4, "rtt_ms": [30.0, 31.0, 40.0]}]
+        f = st.link_facts(hops)
+        self.assertEqual(f["main"], {"up_mbit": 941, "down_mbit": 900, "delay": "a:0.25"})
+        self.assertEqual(f["a"], {"down_mbit": 941, "up_mbit": 900, "delay": "b:20.00"})
+        self.assertEqual(f["b"], {"down_mbit": 20, "up_mbit": 19})
+        with self.assertRaisesRegex(SystemExit, "main -> a: no down_mb_s measured"):
+            st.link_facts([dict(hops[0], down_mb_s=None)])
+
+
 if __name__ == "__main__":
     unittest.main()
