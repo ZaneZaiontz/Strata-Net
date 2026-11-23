@@ -137,6 +137,9 @@ LINK_TEST_PATHS = {"/ping", "/sink", "/source"}
 FETCH_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL",
              "HF_ENDPOINT", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR"}
 NO_ACQUIRE = "STRATA_NO_ACQUIRE"
+REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+MAX_FILES = 64
 
 
 # ---------------------------------------------------------------- TLS (the stage link's keys, stage_tls.hpp)
@@ -427,6 +430,28 @@ def end_tree(p: subprocess.Popen, job: WindowsJob | None) -> None:
     p.wait()
 
 
+def check_request(repo, revision, files) -> list[str]:
+    """The base names of `files` when the repository, the commit and every file are names /fetch takes: .gguf
+    paths whose every part is a plain name (/start's rule), no two with the same base name.
+    ValueError otherwise."""
+    if not isinstance(repo, str) or not REPO.fullmatch(repo):
+        raise ValueError(f"repository: owner/name expected, not {repo!r}")
+    if not isinstance(revision, str) or not COMMIT.fullmatch(revision):
+        raise ValueError(f"commit: a full 40-character commit hash expected, not {revision!r}")
+    if not isinstance(files, list) or not 0 < len(files) <= MAX_FILES:
+        raise ValueError(f"files: 1 to {MAX_FILES} paths expected")
+    names = []
+    for f in files:
+        parts = f.split("/") if isinstance(f, str) and f.endswith(".gguf") else [""]
+        if not all(PLAIN_NAME.fullmatch(p) and p.strip(".") and not DEVICE_NAME.fullmatch(p)
+                   for p in parts):
+            raise ValueError(f"file: a .gguf path of plain names expected, not {f!r}")
+        names.append(parts[-1])
+    if len(set(names)) != len(names):
+        raise ValueError("files: two of them have the same name")
+    return names
+
+
 class Services:
     """node.json's named commands, one run at a time.  The output goes to a temporary file, not a pipe: a command
     that leaves a daemon behind (setsid nohup) would otherwise keep the pipe open and the answer would never come."""
@@ -474,7 +499,7 @@ class Services:
 class Fetcher:
     """POST /fetch: downloads into data_dir from Hugging Face by tools/stage_fetch.py get, a child process (and its
     whole tree) of its own, one at a time.  The job, each file's state and bytes come from the child's JSON events.
-    The request is checked with stage_fetch's rules before anything starts; the child gets only the checked names on
+    The request is checked first, with check_request (`get` runs it too); the child gets only the checked names on
     its command line and only FETCH_ENV of this process's environment (a proxy, a mirror).  The job lives in this
     process only: a stopped agent ends the child, and a restarted one knows no job until the next /fetch."""
 
@@ -502,9 +527,8 @@ class Fetcher:
         if req.get("cancel") is True:
             self.cancel()
             return 200, self.status()
-        import stage_fetch
         try:
-            names = stage_fetch.check_request(req.get("repo"), req.get("revision"), req.get("files"))
+            names = check_request(req.get("repo"), req.get("revision"), req.get("files"))
         except ValueError as e:
             return 400, {"ok": False, "error": str(e)}
         want = {k: req[k] for k in ("repo", "revision", "files")}

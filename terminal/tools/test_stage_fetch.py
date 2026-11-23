@@ -13,6 +13,7 @@ import json
 import os
 import random
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -229,7 +230,7 @@ class FetchTest(unittest.TestCase):
                  (REPO, REV, "x.gguf"), (REPO, REV, [3]), (REPO, REV, ["x.bin"]), (REPO, REV, ["../x.gguf"]),
                  (REPO, REV, ["a/../x.gguf"]), (REPO, REV, ["a\\x.gguf"]), (REPO, REV, ["/x.gguf"]),
                  (REPO, REV, ["CON.gguf"]), (REPO, REV, ["a//x.gguf"]), (REPO, REV, ["a/x.gguf", "b/x.gguf"]),
-                 (REPO, REV, [f"{i}.gguf" for i in range(sf.MAX_FILES + 1)])]
+                 (REPO, REV, [f"{i}.gguf" for i in range(sn.MAX_FILES + 1)])]
         for repo, rev, files in cases:
             with self.subTest(repo=repo, rev=rev, files=str(files)[:40]), self.assertRaises(ValueError):
                 sf.fetch(repo, rev, files, self.tmp)
@@ -308,6 +309,14 @@ class FetcherTest(unittest.TestCase):
         self.assertIn("HF_ENDPOINT", env)
         self.assertTrue((self.tmp / "data" / "fetch.log").is_file())
         self.assertLessEqual(set(env), sn.FETCH_ENV | {"PYTHONIOENCODING"})
+
+    def test_an_agent_run_with_python_i_checks_requests(self):
+        load = (f"import importlib.util as u; s = u.spec_from_file_location('sn', {sn.__file__!r}); "
+                "m = u.module_from_spec(s); s.loader.exec_module(m); "
+                "print(m.Fetcher({'data_dir': 'd'}).request({'repo': 'x'})[0])")
+        env = {k: v for k, v in os.environ.items() if k != "STRATA_NO_ACQUIRE"}
+        run = subprocess.run([sys.executable, "-I", "-c", load], capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(run.stdout.strip(), "400", run.stderr)
 
     def test_a_failure_is_reported(self):
         (self.tmp / "fail").touch()

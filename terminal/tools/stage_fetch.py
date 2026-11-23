@@ -50,33 +50,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(1, str(Path(__file__).resolve().parents[1]))
 import stage_node  # noqa: E402
 
-REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
-COMMIT = re.compile(r"[0-9a-f]{40}")
-MAX_FILES = 64
 FREE_MARGIN = 10 << 30
 WATCH_S = 5
-
-
-def check_request(repo, revision, files) -> list[str]:
-    """The base names of `files` when the repository, the commit and every file are names this tool takes: .gguf
-    paths whose every part is a plain name (stage_node's rule for /start), no two with the same base name.
-    ValueError otherwise."""
-    if not isinstance(repo, str) or not REPO.fullmatch(repo):
-        raise ValueError(f"repository: owner/name expected, not {repo!r}")
-    if not isinstance(revision, str) or not COMMIT.fullmatch(revision):
-        raise ValueError(f"commit: a full 40-character commit hash expected, not {revision!r}")
-    if not isinstance(files, list) or not 0 < len(files) <= MAX_FILES:
-        raise ValueError(f"files: 1 to {MAX_FILES} paths expected")
-    names = []
-    for f in files:
-        parts = f.split("/") if isinstance(f, str) and f.endswith(".gguf") else [""]
-        if not all(stage_node.PLAIN_NAME.fullmatch(p) and p.strip(".") and not stage_node.DEVICE_NAME.fullmatch(p)
-                   for p in parts):
-            raise ValueError(f"file: a .gguf path of plain names expected, not {f!r}")
-        names.append(parts[-1])
-    if len(set(names)) != len(names):
-        raise ValueError("files: two of them have the same name")
-    return names
 
 
 def model_dir(data_dir: Path, repo: str) -> Path:
@@ -120,7 +95,7 @@ def fetch(repo, revision, files, data_dir: Path) -> list[Path]:
     """Download `files` of `repo` at `revision` and check each against Hugging Face's SHA-256; their paths.
     ValueError, before any file is downloaded, for a name this tool does not take, a file the commit does not hold as
     a stored (LFS) file, or too little disk; setup's stop (SystemExit) for a download or a check that fails."""
-    names = check_request(repo, revision, files)
+    names = stage_node.check_request(repo, revision, files)
     import hf_pin_fetch
     import setup
 
@@ -175,7 +150,7 @@ def resolve(source: str, patterns: list[str]) -> tuple[str, str, list[str]]:
     import setup
 
     repo, _, rev = source.partition("@")
-    if not REPO.fullmatch(repo) or rev and not COMMIT.fullmatch(rev):
+    if not stage_node.REPO.fullmatch(repo) or rev and not stage_node.COMMIT.fullmatch(rev):
         raise ValueError(f"REPO or REPO@COMMIT (a full commit hash) expected, not {source!r}")
     rev = rev or setup.HF_REVISIONS.get(repo)
     if not rev:
@@ -188,7 +163,7 @@ def resolve(source: str, patterns: list[str]) -> tuple[str, str, list[str]]:
         if not hit:
             raise ValueError(f"nothing in {repo} at {rev} matches {pattern}")
         files += [f for f in hit if f not in files]
-    check_request(repo, rev, files)
+    stage_node.check_request(repo, rev, files)
     return repo, rev, files
 
 
