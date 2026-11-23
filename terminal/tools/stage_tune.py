@@ -821,6 +821,24 @@ def link_facts(hops: list[dict]) -> dict[str, dict]:
     return f
 
 
+def engine_facts(exe: str, cfg: dict, given: dict) -> dict:
+    """What the engine sizes at load besides the experts, from `strata --serve ARGS --plan-sizes` with the main
+    config's args, env and cwd: session_base_bytes, session_layer_bytes and kv_host_layer.  Not asked when
+    cluster.json's "plan" gives all three."""
+    keys = {"session_base_bytes", "session_layer_bytes", "kv_host_layer"}
+    if keys <= given.get("facts", {}).keys() | given.get("node_facts", {}).keys():
+        return {}
+    try:
+        r = subprocess.run([exe, "--serve", *cfg["args"], "--plan-sizes"], capture_output=True, text=True,
+                           env={**os.environ, **cfg.get("env", {})}, cwd=cfg.get("cwd"), timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        sys.exit(f"stage_tune: {exe} --plan-sizes: {e}")
+    f = dict(x.split("=", 1) for x in r.stdout.splitlines() if x.split("=", 1)[0] in keys)
+    if r.returncode or f.keys() != keys:
+        sys.exit(f"stage_tune: {exe} --plan-sizes failed (an engine older than this tool?)\n{r.stderr[-2000:]}")
+    return f
+
+
 def plan(cluster: dict, out: Path, facts_only: bool) -> None:
     """Writes the planner's facts - the model's from the main config's files, this PC's (the main) read here now,
     each node's from its agent, the links measured, and what cluster.json's "plan" gives - then, unless
@@ -836,12 +854,14 @@ def plan(cluster: dict, out: Path, facts_only: bool) -> None:
             sys.exit(f"stage_tune: {n.name} ({n.agent}) does not answer: {info.get('error')}")
         pcs.append((n.name, info, spec))
     links = link_facts(measure_links(nodes))
-    args = json.loads(Path(main["config"]).read_text(encoding="utf-8"))["args"]
-    lines = [f"{k}={v}" for k, v in {**model_facts(args), **given.get("facts", {})}.items()]
+    cfg = json.loads(Path(main["config"]).read_text(encoding="utf-8"))
+    sizes = engine_facts(main["exe"], cfg, given)
+    kv = {k: sizes.pop(k) for k in ["kv_host_layer"] if k in sizes}
+    lines = [f"{k}={v}" for k, v in {**model_facts(cfg["args"]), **sizes, **given.get("facts", {})}.items()]
     if given.get("calib"):
         lines.append("calib " + given["calib"])
     for name, info, spec in pcs:
-        f = {**pc_facts(name, info, spec), **given.get("node_facts", {}), **links.get(name, {}),
+        f = {**pc_facts(name, info, spec), **kv, **given.get("node_facts", {}), **links.get(name, {}),
              **spec.get("facts", {})}
         lines.append(f"node={name} " + " ".join(f"{k}={v}" for k, v in f.items()))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")

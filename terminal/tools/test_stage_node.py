@@ -1438,6 +1438,25 @@ class PlanFactsTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "main -> a: no down_mb_s measured"):
             st.link_facts([dict(hops[0], down_mb_s=None)])
 
+    def test_sizes_from_the_engine(self):
+        cfg = {"args": ["--pack", "/p"], "env": {"STRATA_HC_Q8": "1"}, "cwd": "/srv"}
+        out = "strata: a note\nsession_base_bytes=5\nsession_layer_bytes=1,2\nkv_host_layer=7\n"
+        with mock.patch.object(st.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=out, stderr="")) as run:
+            f = st.engine_facts("/strata", cfg, {"facts": {"session_base_bytes": 9}})
+            self.assertEqual(f, {"session_base_bytes": "5", "session_layer_bytes": "1,2", "kv_host_layer": "7"})
+            self.assertEqual(run.call_args.args[0], ["/strata", "--serve", "--pack", "/p", "--plan-sizes"])
+            self.assertEqual(run.call_args.kwargs["env"]["STRATA_HC_Q8"], "1")
+            self.assertEqual(run.call_args.kwargs["cwd"], "/srv")
+            run.reset_mock()
+            given = {"facts": {"session_base_bytes": 9, "session_layer_bytes": 3}, "node_facts": {"kv_host_layer": 4}}
+            self.assertEqual(st.engine_facts("/strata", cfg, given), {})
+            run.assert_not_called()
+        with mock.patch.object(st.subprocess, "run", return_value=mock.Mock(returncode=2, stdout="", stderr="bad flag")):
+            with self.assertRaisesRegex(SystemExit, "--plan-sizes failed (?s:.*)bad flag"):
+                st.engine_facts("/strata", cfg, {})
+        with self.assertRaisesRegex(SystemExit, "no-strata --plan-sizes: "):
+            st.engine_facts(str(Path(__file__).with_name("no-strata")), {"args": []}, {})
+
 
 if __name__ == "__main__":
     unittest.main()
