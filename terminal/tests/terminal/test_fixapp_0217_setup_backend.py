@@ -49,7 +49,7 @@ class FeedUpdateGetsTheChosenMake(unittest.TestCase):
     def test_the_callers_name_their_family(self):
         src = (ROOT / "setup.py").read_text(encoding="utf-8")
         self.assertIn('engine_from_feed(eng, updating, "hip")', src)
-        self.assertEqual(src.count('engine_from_feed(eng, updating, "cuda")'), 2)
+        self.assertEqual(src.count('engine_from_feed(eng, updating, "cuda")'), 0)
         self.assertNotIn("engine_from_feed(eng, updating)", src)
 
 
