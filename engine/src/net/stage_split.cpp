@@ -83,7 +83,9 @@ static double prompt_time(const SplitModel& m, const std::vector<NodeCap>& nodes
             run(send_ms(m, from, to, (double) (rows * m.prompt_row_bytes)), delay_between(from, to));
         };
         for (int i = 0; i < ns; ++i) {
-            run((double) c / 1000.0 * (double) layers[(size_t) i] * nodes[(size_t) i].pf_layer_ms, 0);
+            const NodeCap& n = nodes[(size_t) i];
+            run((double) c / 1000.0 * (double) layers[(size_t) i] * n.pf_layer_ms +
+                    (double) layers[(size_t) i] * n.pf_layer_chunk_ms, 0);
             if (i + 1 < ns) cross((size_t) i, c);
         }
         for (size_t h = (size_t) ns - 1; h < hops.size(); ++h) cross(h, back);
