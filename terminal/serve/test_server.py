@@ -7166,7 +7166,7 @@ class OnDemandVision(unittest.TestCase):
         class Engine:
             info = {"expert_slots": slots, "vram_free_mib": 727, "vram_elastic": 1}
 
-            def vram(self, reserve):
+            def vram(self, reserve, device=None):
                 sent.append(reserve)
                 out = replies.pop(0)
                 self.info["expert_slots"] = out["expert_slots"]
