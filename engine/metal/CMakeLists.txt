@@ -173,7 +173,8 @@ target_compile_definitions(strata_metal_kernels PRIVATE
   STRATA_METAL_DATA_DEFAULT="${STRATA_ROOT}/../terminal/data")
 target_link_libraries(strata_metal_kernels PUBLIC strata_metal_host mtl_rt)
 
-add_executable(strata ${S}/program/generate.cpp ${S}/net/stage_link.cpp ${S}/net/stage_tls.cpp)   # (the remote stage, refused on Metal at start)
+add_executable(strata ${S}/program/generate.cpp ${S}/net/stage_link.cpp ${S}/net/stage_tls.cpp ${S}/net/stage_split.cpp
+               ${S}/net/stage_split_facts.cpp)   # (the remote stage, refused on Metal at start)
 target_link_libraries(strata PRIVATE strata_metal_kernels strata_metal_host strata_metal_kernels)
 # the decode window on its own (probe/window_probe.cpp): the engine's process state without the engine, for looking at a Metal fault
 add_executable(window_probe probe/window_probe.cpp)

@@ -546,6 +546,74 @@ What the measurements say (re-measure on your PCs; `terminal/tools/stage_tune.py
   model's largest expert blob, filled with this worker's (smaller) blobs: on UD-Q4_K_XL layers 40-47, N=1000 gave
   1,248 slots and N=1800 gave 1,766 (VRAM-capped, 183 MiB left).
 
+### Asking the planner (`strata --plan-split FACTS`)
+
+`strata --plan-split FACTS` prints the split the planner (`engine/src/net/stage_split.cpp`, from StrataPool) picks
+for a set of PCs, as one line of JSON, and exits. It loads no model and touches no GPU, so it also runs on a PC
+without a GPU driver. **Nothing calls it on its own yet:** the server, the node agent and `stage_tune.py` still use
+the split you give them.
+
+FACTS is a text file of `key=value` words (`#` starts a comment line) and one `node=NAME ...` line per PC, the main
+PC first. Bytes are bytes, times are milliseconds, link speeds Mbit/s. An example for an RTX 3080 main and an
+RTX 5070 worker on 1 GbE (the real file gives the expert sizes per layer):
+
+```
+layers=48
+experts=512
+profile=/path/to/expert-profile.bin
+slot_bytes=2380800
+layer_arena_bytes=1218969600
+layer_kv=0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1,0,0,0,1
+session_base_bytes=314572800 session_layer_bytes=110773898
+window_tokens=1.83 window_rows=2 answer_tokens=400 miss_ms=76
+node=main vram_room=7253741185 ram_room=56913559552 layer_ms=0.508 kv_host_layer=276488519 up_mbit=941 down_mbit=941 delay=worker:0.2
+node=worker vram_room=11302600704 ram_room=24252514304 layer_ms=0.475 kv_host_layer=276488519 up_mbit=941 down_mbit=941
+```
+
+It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...},{"name":"worker","first":31,
+"last":47,...}],"window_ms":33.1,"decode_tok_s":55.3,...}` with the real per-layer sizes.
+
+- **Model, required:** `layers`; `slot_bytes` (VRAM per cached expert), `layer_arena_bytes` (RAM for all of a
+  layer's experts) and `session_layer_bytes` (a layer's VRAM besides its experts: session state and dense weights),
+  each one value for every layer or one per layer, comma-separated; and `miss_ms`, what one window pays per unit of
+  routed mass that no cache holds (the planner weighs the profile's ranks as a power law). It has no default: a
+  worker here reads its missed experts over PCIe, and on an RTX 5070 worker that measured about 40 ms per row a
+  window verifies (75 ms on prose at 2 rows, 150 ms on code at 4), against the 190 ms StrataPool measured for
+  misses its CPUs computed. **Optional:** `session_base_bytes` (VRAM a range
+  takes whatever its layers), `layer_kv` (per layer, 1 where a `--kv-resident` PC keeps a pinned K/V copy),
+  `profile` with `experts` (the expert profile the main runs with: without one no cache fills, so VRAM does not
+  limit the plan), and the planner's workload and link settings, whose defaults and meaning are in
+  `engine/include/strata/net/stage_split.hpp`: `window_tokens`, `window_rows`, `row_bytes`, `ring`,
+  `hop_overhead_ms`, `hop_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_rows`,
+  `answer_tokens`, `kv_copies`, `first_min`.
+- **A split of your own:** `at=30` (or `at=16,32` for three PCs) scores that split over every node in the order
+  given instead of searching, so a split you chose gets the same estimate.
+- **Measured timings:** a line `calib windows=N fixed_ms=MS net_ms=MS scale=S,S,... seen=K` in the text of StrataPool's
+  `SplitCalib` (`stage_split.hpp`). A window then costs `fixed_ms` (the main's own work outside its layers: head,
+  sampling, drafter) plus `net_ms` plus each node's predicted time times its scale. It needs at least 200 measured
+  windows, and a search stays within 3 layers of a split in `seen`, keeping the nodes in the order given.
+  `STRATA_REMOTE_TIMING=1` on the main gives the numbers every 64 windows: the `link` part of a round trip is
+  `net_ms`; the worker's part over the worker's `ms` in the plan for that split without `calib` is its scale. The
+  main's time between windows is its layers and `fixed_ms` together, which the lines do not separate: give the main
+  the worker's scale, and `fixed_ms` that time less the main's `ms` times the scale. Take the timings from the same
+  kind of work as `window_tokens`. SplitCalib has no term for the rows a window verifies, and every part grows with
+  them: on the test pair the main's time between windows was 22 ms on prose and 33 ms on code. There, timings from
+  three prose and three code requests predicted three other requests of each kind within 2%, at the split they came
+  from and at the planner's own pick one layer away; without them the estimate was 6-8% low on prose and 11-12%
+  high on code.
+- **Node, required:** `vram_room` (free VRAM with nothing loaded, less the reserves; on the main also less the head,
+  the drafter and the other weights outside the layers), `ram_room` (RAM available with nothing loaded, less what
+  the engine takes besides its experts and K/V copies and a margin for the system: 3.4-3.6 GiB on the test worker,
+  the same through a 30K-token prompt; 0: no limit), `layer_ms` (GPU time per layer per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
+  `up_mbit`, `down_mbit`, `delay=OTHER:MS,...` (one-way, to other nodes by name). With no speed or delay on any node
+  a crossing costs `hop_ms`.
+
+The answer has `ok`, `at` (the `--layer-split` value), `nodes` (the PCs it uses in chain order, each with its first
+and last layer, its ms per window, cached experts and RAM), `window_ms`, `decode_tok_s`, `prompt_ms`, `request_ms`
+and the `inputs` it used. Exit 0 with a plan; 3 when nothing fits (the line says why); 2 on bad facts (stderr says
+what is wrong). The planner measures nothing: its estimate is only as good as `layer_ms`, `pf_layer_ms` and
+`window_tokens`, which come from real runs.
+
 ## Tools
 
 Three Python scripts (standard library only) in `terminal/tools/`. The agent and the shipper run on Linux and Windows; `stage_tune.py tune` runs on a Linux main PC (it starts and stops the server with `pgrep` / `kill`), `stage_tune.py apply` anywhere. Their docstrings are the
