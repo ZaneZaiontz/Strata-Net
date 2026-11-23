@@ -10,6 +10,7 @@ import contextlib
 import http.client
 import io
 import json
+import os
 import re
 import shutil
 import socket
@@ -58,9 +59,8 @@ class InviteStringTest(unittest.TestCase):
                 sj.split_address(bad)
 
 
-@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
-class ListenerTest(unittest.TestCase):
-    """The join listener: one join per invite, refusals all alike, and nothing from the request in a path."""
+class ListenerCase(unittest.TestCase):
+    """An admin's key folder of its own, an invite and its listener on 127.0.0.1."""
 
     @classmethod
     def setUpClass(cls):
@@ -100,8 +100,13 @@ class ListenerTest(unittest.TestCase):
         finally:
             c.close()
 
-    def peers(self) -> list[str]:
-        return sorted(p.name for p in (self.admin / "peers").iterdir())
+    def peers(self, folder: Path | None = None) -> list[str]:
+        return sorted(p.name for p in (folder or self.admin / "peers").iterdir())
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class ListenerTest(ListenerCase):
+    """The join listener: one join per invite, refusals all alike, and nothing from the request in a path."""
 
     def test_joins_once(self):
         with contextlib.redirect_stdout(io.StringIO()) as out:
@@ -160,6 +165,86 @@ class ListenerTest(unittest.TestCase):
         with self.assertRaisesRegex(ssl.SSLError, "is not this PC's"):
             self.post(self.inv.token, fp="0" * 64)
         self.assertFalse(self.inv.done.is_set())
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class JoinCommandTest(ListenerCase):
+    """`join` against the listener: what each side has after, and nothing written when it fails."""
+
+    def setUp(self):
+        super().setUp()
+        self.node_json = Path(self.tmp.name) / "node" / "node.json"
+        self.keys = Path(shutil.copytree(self.member, self.node_json.parent / "stage-tls"))
+        env = mock.patch.dict("os.environ", {"STRATA_STAGE_TLS": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def join(self, fp: str | None = None) -> str:
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            sj.join_command(sj.make_invite(f"127.0.0.1:{self.port}", fp or self.fp, self.inv.token), self.node_json)
+        return out.getvalue()
+
+    def test_joins_and_the_agent_takes_the_admin_without_a_restart(self):
+        cfg = {"_tls": self.keys, "bind": "127.0.0.1", "_stamp": sn.trust_stamp(self.keys),
+               "_server_ctx": sn.tls_context(self.keys, True), "_client_ctx": sn.tls_context(self.keys, False)}
+        agent = sn.TlsServer(("127.0.0.1", 0), sn.make_handler(cfg, sn.Workers(cfg), sn.Store(cfg)),
+                             cfg["_server_ctx"], cfg)
+        threading.Thread(target=agent.serve_forever, daemon=True).start()
+        self.addCleanup(agent.server_close)
+        self.addCleanup(agent.shutdown)
+        url = f"https://127.0.0.1:{agent.server_address[1]}/info"
+        with self.assertRaises(OSError):
+            sn.https_opener(sn.tls_context(self.admin, False)).open(url, timeout=10)
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(self.tmp.name)
+        self.node_json = Path("node", "node.json")
+        self.assertIn("made overseers/", self.join())
+        admin_pem = (self.admin / "cert.pem").read_text()
+        for folder in ("peers", "overseers"):
+            [name] = self.peers(self.keys / folder)
+            self.assertEqual((self.keys / folder / name).read_text(), admin_pem)
+        [name] = self.peers()
+        self.assertEqual((self.admin / "peers" / name).read_text(), self.member_pem)
+        node = json.loads(self.node_json.read_text())
+        self.assertEqual((node["tls_dir"], node["bind"], node["agent_port"]), (str(self.keys), "127.0.0.1", 7840))
+        self.assertTrue(all(Path(node[k]).is_absolute() for k in ("exe", "log_dir", "tls_dir", "data_dir")))
+        with sn.https_opener(sn.tls_context(self.admin, False)).open(url, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+
+    def test_a_wrong_fingerprint_changes_nothing(self):
+        with self.assertRaisesRegex(SystemExit, "not the PC this invite is from"):
+            self.join(fp="0" * 64)
+        self.assertEqual(self.peers(self.keys / "peers"), [])
+        self.assertFalse((self.keys / "overseers").exists() or self.node_json.exists())
+        self.assertFalse(self.inv.done.is_set())
+
+    def test_a_pc_with_an_overseer_does_not_join_another_pool(self):
+        (self.keys / "overseers").mkdir()
+        shutil.copyfile(self.admin_keys / "cert.pem", self.keys / "overseers" / "other.pem")
+        with self.assertRaisesRegex(SystemExit, "already takes orders from 1 PC"):
+            self.join()
+        self.assertEqual(self.peers(self.keys / "peers"), [])
+        self.assertFalse(self.inv.done.is_set())
+
+    def test_a_lost_answer_says_so(self):
+        with mock.patch.object(http.client.HTTPSConnection, "getresponse", side_effect=ConnectionResetError("reset")), \
+                self.assertRaisesRegex(SystemExit, "answer was lost"):
+            self.join()
+        self.assertTrue(self.inv.done.wait(5))
+
+    def test_a_used_invite_changes_nothing(self):
+        self.inv.done.set()
+        with self.assertRaisesRegex(SystemExit, "refused"):
+            self.join()
+        self.assertEqual(self.peers(self.keys / "peers"), [])
+        self.assertFalse(self.node_json.exists())
+
+    def test_an_existing_key_and_node_json_are_kept(self):
+        cert = (self.keys / "cert.pem").read_bytes()
+        self.node_json.write_text(json.dumps({"exe": "none", "tls_dir": str(self.keys), "agent_port": 17840}))
+        before = self.node_json.read_text()
+        self.join()
+        self.assertEqual(((self.keys / "cert.pem").read_bytes(), self.node_json.read_text()), (cert, before))
 
 
 @unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")

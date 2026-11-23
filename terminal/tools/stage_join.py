@@ -1,6 +1,7 @@
 """Join a PC to a pool with one invite, without copying keys by hand (docs/REMOTE_STAGE.md, "Join with an invite").
 
     python tools/stage_join.py invite [--address HOST[:PORT]] [NODE_JSON]    the admin's PC: prints an invite, waits
+    python tools/stage_join.py join INVITE [NODE_JSON]                       a new PC: joins with it
 
 NODE_JSON (default ~/strata-node/node.json) names the key folder ("tls_dir"; STRATA_STAGE_TLS wins) and the engine
 ("exe") that makes the key when there is none; without the file, the folder is stage-tls/ next to it and the engine
@@ -11,6 +12,10 @@ agent), then prints an invite and serves one join on PORT (default 7839, every I
 MAX_CONNECTIONS at once) until a PC joins, the invite expires (INVITE_HOURS) or Ctrl+C.  HOST:PORT (default: this
 PC's address on the default route) is what goes in the invite: the address the joining PC reaches, a forwarded port
 or a tailnet address too.
+
+`join` makes this PC's key if it has none and joins.  Only once the inviting PC said yes, its certificate goes into
+peers/ (its engine may link with this PC's) and overseers/ (it drives this PC's agent), and NODE_JSON is written if
+there is none: the engine, the address the join went out on as "bind", port AGENT_PORT and a data_dir.
 
 The join is HTTPS, TLS 1.3, with this PC's key.  The joining PC checks this PC's certificate against the invite's
 fingerprint and trusts nothing else; this PC asks for no client certificate.  A request shows the invite's token as
@@ -24,6 +29,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import re
@@ -43,6 +49,7 @@ import stage_node  # noqa: E402
 INVITE_PREFIX = "strata-net:"
 INVITE_HOURS = 1
 JOIN_PORT = 7839
+AGENT_PORT = 7840
 MAX_BODY = 16 << 10
 MAX_CONNECTIONS = 16
 DEFAULT_ROUTE_PROBE = ("192.0.2.1", 9)
@@ -93,15 +100,15 @@ def node_paths(node_json: Path) -> tuple[dict | None, Path, Path]:
     return cfg, Path(d).resolve(), Path((cfg or {}).get("exe") or default_exe())
 
 
-def ensure_key(d: Path, exe: Path) -> None:
-    """This PC's key in d, made with the engine's `--stage-keygen` when it has none (Python cannot make one)."""
+def ensure_key(d: Path, exe: Path, cfg: dict | None) -> None:
+    """This PC's key in d, made with the engine's `--stage-keygen` when it has none (Python cannot make one), with
+    node.json's "lib_dirs" as the agent starts the engine (without node.json, the engine's own folder)."""
     if (d / "cert.pem").exists() and (d / "key.pem").exists():
         return
     if not exe.exists():
         sys.exit(f"stage_join: no key in {d}, and no engine at {exe} to make one")
     d.parent.mkdir(parents=True, exist_ok=True)
-    var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
-    env = dict(os.environ, **{var: os.pathsep.join(filter(None, [str(exe.parent), os.environ.get(var)]))})
+    env = stage_node.with_libs(dict(os.environ), cfg.get("lib_dirs", []) if cfg is not None else [str(exe.parent)])
     r = subprocess.run([str(exe), "--stage-keygen", str(d)], capture_output=True, text=True, env=env)
     if r.returncode != 0:
         sys.exit(f"stage_join: {exe} --stage-keygen {d}: {(r.stderr or r.stdout).strip()}")
@@ -154,10 +161,10 @@ class Invite:
         return hmac.compare_digest(given, self.digest) and not self.done.is_set() and time.time() < self.deadline
 
 
-def write_peer(d: Path, pem: str, name: str) -> Path:
-    """A joined PC's certificate in d/peers/, as NAME's plain characters (at most 32) and its fingerprint."""
+def write_cert(folder: Path, pem: str, name: str) -> Path:
+    """A certificate in `folder`, named as NAME's plain characters (at most 32) and its fingerprint."""
     safe = re.sub(r"[^A-Za-z0-9_-]", "", name)[:32] or "pc"
-    p = d / "peers" / f"{safe}-{fingerprint(pem)[:16]}.pem"
+    p = folder / f"{safe}-{fingerprint(pem)[:16]}.pem"
     p.parent.mkdir(exist_ok=True)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(pem, encoding="ascii")
@@ -253,7 +260,7 @@ def make_join_handler(d: Path, invite: Invite):
                 split_address(agent)
             except (ValueError, KeyError, TypeError, OSError) as e:
                 return f"a bad request ({e})"
-            p = write_peer(d, pem, name)
+            p = write_cert(d / "peers", pem, name)
             invite.done.set()
             self.answer(200, {"ok": True})
             print(f"stage_join: {p.stem} joined (SHA256:{fingerprint(pem)[:16]}, its certificate is in peers/); "
@@ -273,15 +280,20 @@ def default_address() -> str:
             return "127.0.0.1"
 
 
+def make_overseers(d: Path, who: str) -> None:
+    """d/overseers/, and a line saying so when it is new: from then on only `who` drives this PC's agent."""
+    if not (d / "overseers").is_dir():
+        (d / "overseers").mkdir()
+        print(f"stage_join: made overseers/: this PC's agent now takes orders from {who} only")
+
+
 def invite_command(address: str | None, node_json: Path) -> None:
     host, port = split_address(address or default_address())
     if ":" in host:
         raise ValueError(f"{address}: the join listener is IPv4 only, give an IPv4 address or a host name")
-    _, d, exe = node_paths(node_json)
-    ensure_key(d, exe)
-    if not (d / "overseers").is_dir():
-        (d / "overseers").mkdir()
-        print("stage_join: made overseers/: this PC's agent now takes orders from this PC only")
+    cfg, d, exe = node_paths(node_json)
+    ensure_key(d, exe, cfg)
+    make_overseers(d, "this PC")
     addr = f"{host}:{port}"
     inv = Invite()
     srv = JoinServer(("", port), make_join_handler(d, inv), server_context(d))
@@ -301,15 +313,58 @@ def invite_command(address: str | None, node_json: Path) -> None:
         srv.server_close()
 
 
+def join_command(text: str, node_json: Path) -> None:
+    inv, node_json = parse_invite(text), node_json.resolve()
+    cfg, d, exe = node_paths(node_json)
+    held = [p for p in (d / "overseers").glob("*.*") if p.suffix in (".pem", ".crt")]
+    if held:
+        sys.exit(f"stage_join: this PC already takes orders from {len(held)} PC(s), the certificates in "
+                 f"{d / 'overseers'}: remove them to join another pool")
+    ensure_key(d, exe, cfg)
+    c = http.client.HTTPSConnection(*split_address(inv["addr"]), timeout=30, context=client_context(inv["fp"]))
+    sent = False
+    try:
+        c.connect()
+        local, admin = c.sock.getsockname()[0], ssl.DER_cert_to_PEM_cert(c.sock.getpeercert(binary_form=True))
+        body = {"cert": (d / "cert.pem").read_text(encoding="ascii"), "name": socket.gethostname(),
+                "agent": f"{local}:{(cfg or {}).get('agent_port', AGENT_PORT)}"}
+        c.request("POST", "/join", json.dumps(body), {"Authorization": f"Bearer {inv['token']}"})
+        sent = True
+        status = c.getresponse().status
+    except OSError as e:
+        sys.exit(f"stage_join: the request went out but its answer was lost ({e}): the invite may be used, ask for "
+                 "a new one" if sent else
+                 f"stage_join: {inv['addr']} is not the PC this invite is from, no certificate was added here ({e})"
+                 if isinstance(e, ssl.SSLError) else f"stage_join: cannot reach {inv['addr']}: {e}")
+    finally:
+        c.close()
+    if status != 200:
+        sys.exit("stage_join: the invite was refused (used, expired or cancelled): ask for a new one")
+    make_overseers(d, "the PC that sent the invite")
+    for folder in ("peers", "overseers"):
+        write_cert(d / folder, admin, "overseer")
+    if cfg is None:
+        node_json.parent.mkdir(parents=True, exist_ok=True)
+        node_json.write_text(json.dumps({
+            "exe": str(exe), "lib_dirs": [str(exe.parent)], "bind": local, "agent_port": AGENT_PORT,
+            "log_dir": str(node_json.parent), "tls_dir": str(d), "data_dir": str(node_json.parent / "shipped")},
+            indent=2) + "\n", encoding="utf-8")
+    print(f"stage_join: joined. Start this PC's agent with: python {Path(__file__).with_name('stage_node.py')} "
+          f"{node_json}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     inv = sub.add_parser("invite", help="print an invite and wait for one PC to join")
     inv.add_argument("--address", help="HOST[:PORT] the joining PC reaches (default: this PC's LAN address)")
-    inv.add_argument("node_json", nargs="?", type=Path, default=Path.home() / "strata-node" / "node.json")
+    join = sub.add_parser("join", help="join the pool an invite is from")
+    join.add_argument("invite")
+    for p in (inv, join):
+        p.add_argument("node_json", nargs="?", type=Path, default=Path.home() / "strata-node" / "node.json")
     a = ap.parse_args()
     try:
-        invite_command(a.address, a.node_json)
+        invite_command(a.address, a.node_json) if a.cmd == "invite" else join_command(a.invite, a.node_json)
     except ValueError as e:
         sys.exit(f"stage_join: {e}")
 
