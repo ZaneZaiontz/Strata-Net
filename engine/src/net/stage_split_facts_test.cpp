@@ -96,6 +96,7 @@ static void test_fixed_split() {
 }
 
 /// A node's prompt facts: each chunk costs every layer of it pf_layer_chunk_ms plus pf_layer_ms per 1,000 tokens.
+/// The rows coming back cross at drafter_row_bytes, or at prompt_row_bytes without it.
 static void test_prompt_facts() {
     SplitFacts f;
     const SplitPlan p = plan_of(kModel + "prompt_tokens=1000 prompt_chunk=500\n"
@@ -103,6 +104,13 @@ static void test_prompt_facts() {
                                          "pf_layer_chunk_ms=20\n", f);
     CHECK(p.ok && std::fabs(p.prompt_ms - 2 * 8 * (20 + 5)) < 1e-9);
     CHECK(split_plan_json(f, p).find("\"pf_layer_chunk_ms\":20") != std::string::npos);
+    CHECK(split_plan_json(f, p).find("\"drafter_row_bytes\":40960") != std::string::npos);
+    SplitFacts g;
+    const SplitPlan q = plan_of(kModel + "prompt_tokens=1000 prompt_chunk=1000 drafter_row_bytes=20480\nat=4\n"
+                                         "node=a vram_room=1 ram_room=0 layer_ms=0.5\n"
+                                         "node=b vram_room=1 ram_room=0 layer_ms=0.5\n", g);
+    CHECK(q.ok && std::fabs(q.prompt_ms - (2 * 1.2 + 1000 * (40960 + 20480) / 117500.0)) < 1e-9);
+    CHECK(split_plan_json(g, q).find("\"drafter_row_bytes\":20480") != std::string::npos);
 }
 
 /// Measured timings in SplitCalib's text: the window is the coordinator's fixed time, the network's and each node's
