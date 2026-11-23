@@ -8,6 +8,7 @@ HTTPS and who it takes), the shipper's node paths (tools/stage_ship.py) and the 
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -1211,7 +1212,9 @@ class AgentTlsTest(unittest.TestCase):
         trust(leaf, self.main)
 
         def serve(folder: Path):
-            srv = sn.TlsServer(("127.0.0.1", 0), self.handler, sn.tls_context(folder, True))
+            cfg = {"_tls": folder, "bind": "127.0.0.1"}
+            srv = sn.TlsServer(("127.0.0.1", 0), sn.make_handler(cfg, sn.Workers(cfg), sn.Store(cfg)),
+                               sn.tls_context(folder, True))
             threading.Thread(target=srv.serve_forever, daemon=True).start()
             return srv, f"https://127.0.0.1:{srv.server_address[1]}/ping"
 
@@ -1289,6 +1292,117 @@ class AgentTlsTest(unittest.TestCase):
         (bad / "peers" / "x.pem").write_text("not a certificate")
         with self.assertRaisesRegex(ValueError, r"no certificate in .*x\.pem"):
             sn.tls_context(bad, True)
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class TrustListsTest(unittest.TestCase):
+    """peers/ and overseers/: who may drive the agent and who only runs link tests, read again when they change."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.keydir = tempfile.TemporaryDirectory()
+        k = Path(cls.keydir.name)
+        cls.boss, cls.neighbour, cls.stranger = (make_keys(k / n, n) for n in ("boss", "neighbour", "stranger"))
+        cls.made = make_keys(k / "node", "node")
+        for other in (cls.boss, cls.neighbour, cls.stranger):
+            trust(other, cls.made)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.keydir.cleanup()
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.node = Path(shutil.copytree(self.made, Path(self.tmp.name) / "node"))
+        trust(self.node, self.boss)
+        trust(self.node, self.neighbour)
+        self.err = io.StringIO()
+        self.quiet = mock.patch.object(sys, "stderr", self.err)
+        self.quiet.start()
+        self.addCleanup(self.quiet.stop)
+        self.addCleanup(self.tmp.cleanup)
+
+    def serve(self) -> None:
+        cfg = {"_tls": self.node, "bind": "127.0.0.1", "data_dir": self.tmp.name, "drop_cache": False,
+               "_stamp": sn.trust_stamp(self.node),
+               "_server_ctx": sn.tls_context(self.node, True), "_client_ctx": sn.tls_context(self.node, False)}
+        srv = sn.TlsServer(("127.0.0.1", 0), sn.make_handler(cfg, sn.Workers(cfg), sn.Store(cfg)),
+                           cfg["_server_ctx"], cfg)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        self.url = f"https://127.0.0.1:{srv.server_address[1]}"
+
+    def call(self, who: Path, path: str, body: bytes | None = None) -> int:
+        """The HTTP status `who` gets for a GET (or a POST with `body`)."""
+        try:
+            with sn.https_opener(sn.tls_context(who, False)).open(self.url + path, data=body, timeout=10) as r:
+                r.read()
+                return r.status
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code
+
+    def oversee(self, who: Path) -> None:
+        (self.node / "overseers").mkdir(exist_ok=True)
+        shutil.copyfile(who / "cert.pem", self.node / "overseers" / f"{who.name}.pem")
+
+    def test_without_overseers_every_peer_drives(self):
+        self.serve()
+        self.assertEqual(self.call(self.neighbour, "/info"), 200)
+        self.assertEqual(self.call(self.neighbour, "/stop", b"{}"), 200)
+
+    def test_a_peer_only_runs_link_tests(self):
+        self.oversee(self.boss)
+        (self.node / "peers" / "boss.pem").unlink()
+        self.serve()
+        for path, body in (("/ping", None), ("/source?mib=1", None), ("/sink", b"x" * 1000)):
+            self.assertEqual(self.call(self.neighbour, path, body), 200, path)
+        self.assertEqual(self.call(self.neighbour, "/info"), 403)
+        self.assertEqual(self.call(self.neighbour, "/stop", b"{}"), 403)
+        self.assertEqual(self.call(self.boss, "/info"), 200)
+        self.assertEqual(self.call(self.boss, "/stop", b"{}"), 200)
+        self.assertEqual(self.call(self.node, "/info"), 200)
+        self.assertNotIn(hashlib.sha256(ssl.PEM_cert_to_DER_cert((self.boss / "cert.pem").read_text())).hexdigest(),
+                         sn.tls_context(self.node, False).pinned)
+
+    def test_changes_apply_without_a_restart(self):
+        self.serve()
+        with self.assertRaises((ssl.SSLError, urllib.error.URLError, ConnectionError)):
+            self.call(self.stranger, "/ping")
+        trust(self.node, self.stranger)
+        self.assertEqual(self.call(self.stranger, "/ping"), 200)
+        self.oversee(self.boss)
+        self.assertEqual(self.call(self.stranger, "/info"), 403)
+        self.assertEqual(self.call(self.boss, "/info"), 200)
+        (self.node / "peers" / "stranger.pem").unlink()
+        with self.assertRaises((ssl.SSLError, urllib.error.URLError, ConnectionError)):
+            self.call(self.stranger, "/ping")
+
+    def test_a_bad_file_leaves_only_this_pc(self):
+        self.serve()
+        (self.node / "peers" / "junk.pem").write_text("not a certificate\n")
+        with self.assertRaises((ssl.SSLError, urllib.error.URLError, ConnectionError)):
+            self.call(self.boss, "/info")
+        self.assertEqual(self.call(self.made, "/info"), 200)
+        self.assertIn("does not load", self.err.getvalue())
+        (self.node / "peers" / "junk.pem").unlink()
+        self.assertEqual(self.call(self.boss, "/info"), 200)
+
+    def test_an_open_connection_loses_access(self):
+        self.serve()
+        c = http.client.HTTPSConnection(self.url[len("https://"):], context=sn.tls_context(self.neighbour, False))
+        self.addCleanup(c.close)
+
+        def put(name):
+            c.request("POST", f"/put?path={name}&offset=0&total=4", body=b"abcd")
+            r = c.getresponse()
+            r.read()
+            return r.status
+        self.assertEqual(put("a.bin"), 200)
+        (self.node / "peers" / "neighbour.pem").unlink()
+        self.assertEqual(put("b.bin"), 403)
+        self.assertFalse((Path(self.tmp.name) / "b.bin").exists())
 
 
 class GgufItemsTest(unittest.TestCase):

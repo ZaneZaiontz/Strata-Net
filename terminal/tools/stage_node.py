@@ -36,11 +36,13 @@ node.json (paths are this PC's):
     }
 
 Who may drive it: the agent speaks HTTPS, TLS 1.3 only, and takes a connection only from a PC whose certificate is
-this PC's own or one in tls_dir/peers/ - the same folder, and the same rule, as its workers' stage link
-(docs/REMOTE_STAGE.md, "Keys").  The tuner and the shipper show their PC's certificate, and check the agent's in
-turn.  Such a PC can start and stop this PC's workers with the engine and model files node.json names, and the
-flags in EXTRA_ALLOWED (or "extra_allow"); with "data_dir", write files under it; with "allow_put_bin", also the
-engine there (that is running code of their choice - for a node you ship the engine to).
+this PC's own or one in tls_dir/peers/ or tls_dir/overseers/ (docs/REMOTE_STAGE.md, "Security").  Without an
+overseers/ folder every such PC drives it, as before; with one, only this PC and those in overseers/ do, and a PC
+only in peers/ (a stage link neighbour) gets the link tests (LINK_TEST_PATHS) and 403 elsewhere.  The folders are
+read again when they change, without a restart.  The tuner and the shipper show their PC's certificate, and check
+the agent's in turn.  A PC that drives it can start and stop this PC's workers with the engine and model files
+node.json names, and the flags in EXTRA_ALLOWED (or "extra_allow"); with "data_dir", write files under it; with
+"allow_put_bin", also the engine there (that is running code of their choice - for a node you ship the engine to).
 
 The page cache: a worker reads its layers' experts through the file cache and copies them into pinned memory, and
 a shipped file passes through the cache too - left there, a 10-layer worker would take its experts' RAM twice (and
@@ -125,14 +127,15 @@ RESTART_STABLE_S = 600.0   # ... back to RESTART_FIRST_S after a run at least th
 
 
 HANDSHAKE_TIMEOUT_S = 10  # a peer's TLS handshake, as a worker allows its main process
+LINK_TEST_PATHS = {"/ping", "/sink", "/source"}
 
 
 # ---------------------------------------------------------------- TLS (the stage link's keys, stage_tls.hpp)
 # Each PC's folder from `strata --stage-keygen DIR`: key.pem, cert.pem and peers/ (the other PCs' cert.pem, as *.pem
-# or *.crt).  A peer is accepted when its certificate is this PC's own or one in peers/, that certificate itself:
-# each is a trust anchor of its own (PARTIAL_CHAIN), and PinnedSocket then wants the peer's own among them (the chain's
-# check alone also passes one an accepted certificate signed, a CA's in peers/ too).  Host names and the clock
-# (NO_CHECK_TIME) are not looked at, as in the engine.
+# or *.crt), and for the agent overseers/ too.  A peer is accepted when its certificate is this PC's own or one there,
+# that certificate itself: each is a trust anchor of its own (PARTIAL_CHAIN), and PinnedSocket then wants the peer's
+# own among them (the chain's check alone also passes one an accepted certificate signed, a CA's in peers/ too).  Host
+# names and the clock (NO_CHECK_TIME) are not looked at, as in the engine.
 PARTIAL_CHAIN = getattr(ssl, "VERIFY_X509_PARTIAL_CHAIN", 0x80000)   # (the flag itself before Python 3.10)
 NO_CHECK_TIME = 0x200000   # X509_V_FLAG_NO_CHECK_TIME (OpenSSL 1.1.0 and later; Python has no name for it)
 PEM_CERT = re.compile(r"-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----")
@@ -151,19 +154,19 @@ class PinnedSocket(ssl.SSLSocket):
             # Two arguments: with one, str() of an SSLError is its args tuple.
             raise ssl.SSLError(ssl.SSL_ERROR_SSL,
                                f"{peer_name(self) or 'a peer without a certificate'} is not this PC's nor in its "
-                               "peers/ folder (an accepted certificate signed it, but it is not one of them)")
+                               "peers/ or overseers/ folder (an accepted certificate signed it, but it is not one of "
+                               "them)")
 
 
 class PinnedContext(ssl.SSLContext):
     sslsocket_class = PinnedSocket
 
 
-def accepted_certs(d: Path) -> str:
-    """This PC's certificate and every one in d/peers/, as one PEM text; a file there without one is an error, as
-    it is to the engine."""
-    peers = d / "peers"
-    files = [d / "cert.pem"] + (sorted(p for p in peers.iterdir() if p.suffix in (".pem", ".crt") and p.is_file())
-                                if peers.is_dir() else [])
+def accepted_certs(d: Path, folders=("peers",)) -> str:
+    """This PC's certificate and every one in d's `folders`, as one PEM text; a file there without one is an error,
+    as it is to the engine (which reads peers/ only)."""
+    files = [d / "cert.pem"] + [p for f in folders if (d / f).is_dir() for p in sorted((d / f).iterdir())
+                                if p.suffix in (".pem", ".crt") and p.is_file()]
     texts = []
     for p in files:
         t = p.read_text(encoding="ascii", errors="replace")
@@ -173,8 +176,61 @@ def accepted_certs(d: Path) -> str:
     return "".join(texts)
 
 
-def tls_context(d: Path, server: bool) -> ssl.SSLContext:
-    """TLS 1.3 only, this PC's key, and a peer's certificate required and pinned to accepted_certs."""
+def fingerprints(pem: str) -> set[str]:
+    """The SHA-256 of each certificate in a PEM text, as hex."""
+    return {hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest() for m in PEM_CERT.finditer(pem)}
+
+
+def trust_stamp(d: Path):
+    """The name, size and change time of every file accepted_certs reads, and whether overseers/ is there, to see
+    that the key folder changed; None when it cannot be read whole."""
+    try:
+        files = [d / "cert.pem"] + [p for f in ("peers", "overseers") if (d / f).is_dir() for p in (d / f).iterdir()]
+        return sorted((str(p), p.stat().st_size, p.stat().st_mtime_ns) for p in files) + [(d / "overseers").is_dir()]
+    except OSError:
+        return None
+
+
+def trust_note(ctx: ssl.SSLContext) -> str:
+    """How many certificates a context accepts, and how many of them drive the agent."""
+    who = "all of them" if ctx.drivers is None else str(len(ctx.drivers))
+    return f"{len(ctx.pinned)} certificate(s) accepted, {who} may drive this agent"
+
+
+TLS_LOCK = threading.Lock()
+
+
+def reload_tls(cfg: dict) -> ssl.SSLContext:
+    """cfg's server and client contexts, made again when its key folder changed since the last look.  While the
+    changed folder does not load, they accept only this PC (nobody when its own key does not load either), and the
+    error is logged once."""
+    with TLS_LOCK:
+        d, stamp = cfg["_tls"], trust_stamp(cfg["_tls"])
+        if stamp != cfg.get("_stamp"):
+            cfg["_stamp"] = stamp
+            try:
+                cfg["_server_ctx"], cfg["_client_ctx"] = tls_context(d, True), tls_context(d, False)
+                sys.stderr.write(f"stage_node: the key folder changed: {trust_note(cfg['_server_ctx'])}\n")
+            except (OSError, ssl.SSLError, ValueError) as e:
+                who = "only this PC is"
+                try:
+                    cfg["_server_ctx"], cfg["_client_ctx"] = tls_context(d, True, ()), tls_context(d, False, ())
+                except (OSError, ssl.SSLError, ValueError):
+                    who = "nobody is"
+                    cfg["_server_ctx"] = PinnedContext(ssl.PROTOCOL_TLS_SERVER)
+                    cfg["_client_ctx"] = PinnedContext(ssl.PROTOCOL_TLS_CLIENT)
+                    cfg["_server_ctx"].pinned = cfg["_server_ctx"].drivers = set()
+                sys.stderr.write(f"stage_node: the key folder changed but does not load, {who} accepted until it "
+                                 f"does: {e}\n")
+        return cfg["_server_ctx"]
+
+
+def tls_context(d: Path, server: bool, folders=None) -> ssl.SSLContext:
+    """TLS 1.3 only, this PC's key, and a peer's certificate required and pinned to accepted_certs of `folders`
+    (default: peers/ and overseers/ for the agent's server side, peers/ alone for a client).  `drivers`, on the
+    server side: the fingerprints that may drive the agent (this PC's and overseers/), or None without an
+    overseers/ folder."""
+    folders = (("peers", "overseers") if server else ("peers",)) if folders is None else folders
     ctx = PinnedContext(ssl.PROTOCOL_TLS_SERVER if server else ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3
     # the security level the engine's link sets (2), whatever the PC's openssl.cnf says (a policy at level 4 refuses
@@ -185,9 +241,11 @@ def tls_context(d: Path, server: bool) -> ssl.SSLContext:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.load_cert_chain(d / "cert.pem", d / "key.pem")
-    accepted = accepted_certs(d)
+    accepted = accepted_certs(d, folders)
     ctx.load_verify_locations(cadata=accepted)
-    ctx.pinned = {hashlib.sha256(ssl.PEM_cert_to_DER_cert(m.group(0))).hexdigest() for m in PEM_CERT.finditer(accepted)}
+    ctx.pinned = fingerprints(accepted)
+    ctx.drivers = fingerprints(accepted_certs(d, ("overseers",))) \
+        if server and "overseers" in folders and (d / "overseers").is_dir() else None
     ctx.verify_flags |= PARTIAL_CHAIN | NO_CHECK_TIME
     if server:
         ctx.num_tickets = 0   # no resumption: every connection shows its certificate
@@ -418,6 +476,7 @@ def load_config(path: str) -> dict:
         sys.exit(f"stage_node: node.json: {e}")
     d = tls_dir(cfg.get("tls_dir"), "stage_node")
     try:
+        cfg["_stamp"] = trust_stamp(d)
         cfg["_tls"], cfg["_server_ctx"], cfg["_client_ctx"] = d, tls_context(d, True), tls_context(d, False)
     except (OSError, ssl.SSLError, ValueError) as e:
         sys.exit(f"stage_node: the key folder {d}: {e}")
@@ -1087,6 +1146,7 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
         protocol_version = "HTTP/1.1"
         timeout = 600
         peer = ""   # the handshaken peer's certificate (peer_name)
+        peer_fp = ""
 
         def handle(self):
             # the TLS handshake first, on this request's thread (the server's accept never waits for one), within
@@ -1095,6 +1155,7 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                 self.connection.settimeout(HANDSHAKE_TIMEOUT_S)
                 self.connection.do_handshake()
                 self.peer = peer_name(self.connection)
+                self.peer_fp = hashlib.sha256(self.connection.getpeercert(binary_form=True) or b"").hexdigest()
                 self.connection.settimeout(self.timeout)
             except (ssl.SSLError, OSError, AttributeError) as e:
                 sys.stderr.write(f"stage_node: {self.client_address[0]} refused: TLS: {e}\n")
@@ -1115,10 +1176,16 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
             self.end_headers()
             self.wfile.write(body)
 
-        def authorized(self) -> bool:   # (handle let only a handshaken peer this far; this keeps it so)
-            if self.peer:
+        def authorized(self, path: str) -> bool:
+            """A peer the key folder accepts now (not only when it connected) that may drive this agent, or any
+            accepted one for a link test."""
+            ctx = reload_tls(cfg)
+            accepted = bool(self.peer) and self.peer_fp in ctx.pinned
+            if accepted and (ctx.drivers is None or self.peer_fp in ctx.drivers or path in LINK_TEST_PATHS):
                 return True
-            self.reply(403, {"ok": False, "error": "no TLS peer certificate"})
+            self.reply(403, {"ok": False, "error": "no TLS peer certificate" if not self.peer else
+                             f"{self.peer} is not accepted here any more" if not accepted else
+                             f"{self.peer} is not in this PC's overseers/: link tests only"})
             return False
 
         def body_json(self) -> dict:
@@ -1126,9 +1193,9 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
             return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
         def do_GET(self):
-            if not self.authorized():
-                return
             u = urlparse(self.path)
+            if not self.authorized(u.path):
+                return
             q = parse_qs(u.query)
             if u.path == "/ping":   # a round trip with no work behind it (/info runs nvidia-smi)
                 self.reply(200, {"ok": True})
@@ -1174,9 +1241,9 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                 self.reply(404, {"ok": False, "error": "unknown path"})
 
         def do_POST(self):
-            if not self.authorized():
-                return
             u = urlparse(self.path)
+            if not self.authorized(u.path):
+                return
             path = u.path
             if path == "/put":   # a shipped file's bytes (tools/stage_ship.py)
                 q = parse_qs(u.query)
@@ -1268,14 +1335,16 @@ def ping_ms(url: str, ctx: ssl.SSLContext, n: int) -> list[float]:
 
 class TlsServer(ThreadingHTTPServer):
     """The agent's HTTPS server: each connection is wrapped as it is accepted, its handshake left to its own thread
-    (the handler's handle)."""
+    (the handler's handle).  With `cfg`, its contexts are made again first when its key folder changed (reload_tls)."""
 
-    def __init__(self, addr, handler, ctx: ssl.SSLContext):
-        self.ctx = ctx
+    def __init__(self, addr, handler, ctx: ssl.SSLContext, cfg: dict | None = None):
+        self.ctx, self.cfg = ctx, cfg
         super().__init__(addr, handler)
 
     def get_request(self):
         sock, addr = self.socket.accept()
+        if self.cfg is not None:
+            self.ctx = reload_tls(self.cfg)
         return self.ctx.wrap_socket(sock, server_side=True, do_handshake_on_connect=False), addr
 
 
@@ -1286,12 +1355,11 @@ def main() -> None:
     workers = Workers(cfg)
     addr = cfg.get("agent_bind") or cfg["bind"]
     srv = TlsServer((addr, int(cfg.get("agent_port", 7840))), make_handler(cfg, workers, Store(cfg)),
-                    cfg["_server_ctx"])
+                    cfg["_server_ctx"], cfg)
     workers.note_idle(gpu_info(), ram_info())
     cert = ssl.PEM_cert_to_DER_cert((cfg["_tls"] / "cert.pem").read_text(encoding="ascii"))
-    n = accepted_certs(cfg["_tls"]).count("-----BEGIN CERTIFICATE-----")
     sys.stderr.write(f"stage_node: listening on https://{addr}:{cfg.get('agent_port', 7840)} (TLS 1.3: this PC is "
-                     f"SHA256:{hashlib.sha256(cert).hexdigest()[:16]}; {n} certificate(s) accepted)\n")
+                     f"SHA256:{hashlib.sha256(cert).hexdigest()[:16]}; {trust_note(cfg['_server_ctx'])})\n")
 
     def interrupt(signum, frame):   # a service stop (SIGTERM) or Ctrl+Break: stop the workers, reset the clocks
         raise KeyboardInterrupt
