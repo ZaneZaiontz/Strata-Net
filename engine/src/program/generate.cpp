@@ -5028,6 +5028,9 @@ int main(int argc, char** argv) {
         // (0.1.44: the head-alias loan is laid out for a single-GPU whole model; the worker has no head)
         else if (o.prefill_head_alias)
             why = "it does not support --prefill-head-alias";
+        else if (remote_main && o.conversation_cache_swap_block_mib > 0)
+            why = "--conversation-cache-swap-block-mib exchanges a parked conversation on this PC only, without the "
+                  "worker's half: leave it at 0 (parked conversations still park whole on both PCs)";
         // a control vector (and the speed projection, which is one) and helper-GPU expert caches act on every layer:
         // the worker would not apply them to its layers
         else if (!o.cvec_files.empty())
