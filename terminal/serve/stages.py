@@ -376,7 +376,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 _stage_node = None
-_contexts: dict[str, object] = {}
+_contexts: dict[str, tuple] = {}
 _contexts_lock = threading.Lock()
 
 
@@ -397,16 +397,17 @@ def stage_node():
 def _opener(keys: str):
     """Straight to the agent over HTTPS with this PC's stage key (`keys`: the engine's STRATA_STAGE_TLS): its
     certificate one this PC accepts, no plain http, no redirect, and no proxy (HTTP_PROXY, the system's).  The folder
-    is read once per server start, as the engine reads it once per start."""
+    is read again when it changes (a PC that joined with tools/stage_join.py), as the agent reads its own."""
     if not keys:
         raise AgentSaid("no key folder: the agents speak HTTPS with this PC's stage key (STRATA_STAGE_TLS in the "
                         "engine's environment)")
     with _contexts_lock:
-        ctx = _contexts.get(keys)
-        if ctx is None:
-            sn = stage_node()
+        sn = stage_node()
+        d = Path(keys).resolve()
+        stamp, ctx = _contexts.get(keys, (None, None))
+        if ctx is None or stamp != sn.trust_stamp(d):
             try:
-                ctx = _contexts[keys] = sn.tls_context(Path(keys).resolve(), server=False)
+                stamp, ctx = _contexts[keys] = sn.trust_stamp(d), sn.tls_context(d, server=False)
             except (OSError, ssl.SSLError, ValueError) as e:
                 raise AgentSaid(f"the key folder (STRATA_STAGE_TLS): {e}") from None
     o = urllib.request.OpenerDirector()
