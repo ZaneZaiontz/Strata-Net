@@ -674,8 +674,9 @@ shipper's paths.
 **`terminal/tools/stage_node.py`: a node agent** on each worker PC. It starts and stops that PC's stage workers on request
 and reports the PC (GPU, RAM, CPU) and the link speed toward other nodes. It speaks HTTPS (TLS 1.3 only) with the
 PC's key folder, the workers' (`"tls_dir"`, or `STRATA_STAGE_TLS`, which wins), and serves only a client whose
-certificate is in that folder's `peers/` (or is its own); the shipper and the tuner check the agent's certificate the
-same way with theirs. A client that is refused is closed in the handshake, and the agent prints
+certificate is in that folder's `peers/` or `overseers/` (or is its own); the shipper and the tuner check the agent's
+certificate against their own `peers/`. With an `overseers/` folder, only those PCs drive the agent
+([Security](#security)). A client that is refused is closed in the handshake, and the agent prints
 `stage_node: ADDRESS refused: TLS: ...`; every request it serves names its client in the agent's log. An `http://`
 agent address in an older config is taken as `https://`.
 
@@ -916,13 +917,27 @@ What it does not do:
   `peers/` folder chooses whom that PC accepts. `--stage-keygen` makes the folder the user's alone (mode 0700; on
   Windows a DACL of that user, SYSTEM and Administrators, not the one a folder under `C:\` inherits, which lets every
   signed-in user change it); keep it so, and run Strata as that user. To shut a PC out, delete its certificate from
-  every `peers/` folder and restart the stages and agents there: they read the folder at start, and nothing else
-  revokes a certificate. The certificates' dates are not checked: a pinned certificate is the PC, also on a PC whose
-  clock is wrong.
-- **No roles.** Every accepted PC is trusted fully: a main process can drive every worker that accepts it, and an
-  accepted client can do whatever an agent allows: start the engine with the flags it allows, write files under
-  `data_dir` and (with `"allow_put_bin"`) the engine itself. An agent run as administrator for `"gpu_clocks"`
-  starts its workers as administrator too.
+  every `peers/` and `overseers/` folder and restart the stages there: they read the folder at start, and nothing
+  else revokes a certificate. An agent reads its folder again on its next request after a change, also on a
+  connection already open, so it needs no restart. While a changed folder does not load (a half-copied file, say),
+  the agent accepts only this PC until it does. The certificates' dates are not checked: a pinned certificate is
+  the PC, also on a PC whose clock is wrong.
+- **Few roles.** A main process can drive every worker that accepts it. A client that drives an agent can do
+  whatever the agent allows: start the engine with the flags it allows, write files under `data_dir` and (with
+  `"allow_put_bin"`) the engine itself. An agent run as administrator for `"gpu_clocks"` starts its workers as
+  administrator too. Without an `overseers/` folder in the key folder, every PC the agent accepts drives it. With
+  one, only this PC and the PCs whose certificates are in `overseers/` do, and a PC that is only in `peers/` gets
+  the link tests and a 403 for everything else:
+
+  | Path | A PC only in `peers/` |
+  |---|---|
+  | `/ping`, `/sink`, `/source` | allowed: the link tests the tuner runs between neighbours |
+  | `/info`, `/log`, `/ranges`, `/sha256` | refused: they show the PC, its workers and its files |
+  | `/start`, `/stop`, `/put`, `/service` | refused: they run or change things on the PC |
+  | `/send` | refused: it makes the agent connect to an address of the caller's choice |
+
+  The engine reads only `peers/`, so a PC that is only in `overseers/` drives the agent but does not link with its
+  workers, and the agent's own client side (`/send`) does not take it as an agent.
 - **The sizes and times of messages are visible.** Someone on the network sees when a prompt is read and roughly
   how long it is (a chunk's size), and the pace of the answer (one round trip a window).
 - **Floods.** Anyone who reaches the port can open connections. A worker serves one main process at a time and drops
@@ -984,7 +999,7 @@ window, a split that decodes as fast as without it, and ~32K-token prompts read 
 | `the peer refused the handshake (...): no TLS 1.3 cipher suite, key exchange or signature algorithm in common, ...` | not a refused certificate: the other side is not this build of the engine (a changed one, or something else on the port). The same build on every PC |
 | `the peer does not speak TLS 1.3 (...)`, or `... in the TLS handshake (a peer without TLS - an older Strata - or one that refused this PC)` | the other side runs a build from before TLS (protocol 5), or something else listens on the port: the same build of the engine on every PC |
 | `this build has no TLS (it was built without OpenSSL 1.1.1 or later)` | build the engine again with OpenSSL's development files (`libssl-dev`); CMake's warning names what it did not find |
-| the shipper or the tuner fails with an SSL error (`CERTIFICATE_VERIFY_FAILED`, `alert unknown ca`, `certificate required`); the agent prints `stage_node: ADDRESS refused: TLS: ...` | the same certificates as for the link, both ways: this PC's `cert.pem` in the node's `peers/`, the node's in this PC's (`--tls-dir`, `"tls_dir"`), and restart the agent after changing its `peers/` |
+| the shipper or the tuner fails with an SSL error (`CERTIFICATE_VERIFY_FAILED`, `alert unknown ca`, `certificate required`); the agent prints `stage_node: ADDRESS refused: TLS: ...` | the same certificates as for the link, both ways: this PC's `cert.pem` in the node's `peers/`, the node's in this PC's (`--tls-dir`, `"tls_dir"`). The agent picks up a change in its `peers/` on the next connection |
 | `the main process reads images (--vision): start this worker with --vision too` | add `--vision` to every worker's command, a relay's next worker's too ([Images](#images---vision)) |
 | `remote stage: the two sides differ (protocol ..., first remote layer ..., K/V type ..., model pack ...)` | the same build of the engine on every PC, the same pack, and `--stage-begin` = the previous stage's K (a K/V type there: both PCs run a build from before the K/V element check - the same `--kv` and `--kv-resident` on both, or newer builds) |
 | `remote stage: the two sides differ (K/V type --kv ...)` | the same `--kv` on every PC |
