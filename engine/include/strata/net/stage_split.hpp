@@ -89,6 +89,7 @@ struct SplitModel {
     int64_t row_bytes = 51216;    ///< one window row: 12,804 floats in fp32 (half that in bf16)
     bool ring = false;   ///< the last node sends straight back to the coordinator: N crossings a window, not 2(N - 1)
     int64_t prompt_row_bytes = 40960;   ///< one prompt row: 10,240 floats in fp32 (half that in bf16)
+    int64_t drafter_row_bytes = 0;      ///< one prompt row coming back for the drafter (0: prompt_row_bytes)
     int64_t prompt_chunk = 2944;        ///< prompt tokens per chunk (--prefill)
     int64_t drafter_rows = 32896;       ///< the prompt's last rows that come back for the drafter (0: no drafter)
     /// The workload a plan is chosen for: the search minimises a request's time, its prompt plus answer_tokens /

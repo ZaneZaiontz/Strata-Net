@@ -61,11 +61,13 @@ static double window_net_ms(const SplitModel& m, const std::vector<NodeCap>& nod
 /// crossings between them, then the rows the drafter reads go back to the coordinator.  Each part (a node's GPU, a
 /// link's sending side) takes the next chunk as soon as it is done with this one, so the slowest part sets the pace
 /// and the others add their time for one chunk; a delay holds a chunk up without keeping its link busy.  Crossings are
-/// priced per link with or without link facts (unknown speeds as a LAN, no delay).
+/// priced per link with or without link facts (unknown speeds as a LAN, no delay), the rows coming back at
+/// `drafter_row_bytes` when it is set.
 static double prompt_time(const SplitModel& m, const std::vector<NodeCap>& nodes, const std::vector<int64_t>& layers) {
     const int ns = (int) nodes.size();
     const auto hops = crossings(ns, m.ring);
     const int64_t chunk = std::max<int64_t>(m.prompt_chunk, 1), from_row = m.prompt_tokens - m.drafter_rows;
+    const int64_t back_row = m.drafter_row_bytes > 0 ? m.drafter_row_bytes : m.prompt_row_bytes;
     std::vector<double> free_at((size_t) ns + hops.size(), 0.0);
     double t = 0;
     for (int64_t start = 0; start < m.prompt_tokens; start += chunk) {
@@ -78,17 +80,17 @@ static double prompt_time(const SplitModel& m, const std::vector<NodeCap>& nodes
             free_at[part++] = t;
             t += delay;
         };
-        auto cross = [&](size_t h, int64_t rows) {
+        auto cross = [&](size_t h, int64_t rows, int64_t row_bytes) {
             const NodeCap &from = nodes[(size_t) hops[h].first], &to = nodes[(size_t) hops[h].second];
-            run(send_ms(m, from, to, (double) (rows * m.prompt_row_bytes)), delay_between(from, to));
+            run(send_ms(m, from, to, (double) (rows * row_bytes)), delay_between(from, to));
         };
         for (int i = 0; i < ns; ++i) {
             const NodeCap& n = nodes[(size_t) i];
             run((double) c / 1000.0 * (double) layers[(size_t) i] * n.pf_layer_ms +
                     (double) layers[(size_t) i] * n.pf_layer_chunk_ms, 0);
-            if (i + 1 < ns) cross((size_t) i, c);
+            if (i + 1 < ns) cross((size_t) i, c, m.prompt_row_bytes);
         }
-        for (size_t h = (size_t) ns - 1; h < hops.size(); ++h) cross(h, back);
+        for (size_t h = (size_t) ns - 1; h < hops.size(); ++h) cross(h, back, back_row);
     }
     return t;
 }
