@@ -822,10 +822,7 @@ class Workers:
         env.pop("STRATA_STAGE_TOKEN", None)
         env["STRATA_STAGE_TLS"] = str(c["_tls"])
         env["STRATA_REMOTE_TIMING"] = "1"
-        libs = os.pathsep.join(c.get("lib_dirs", []))
-        if libs:
-            var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
-            env[var] = libs + (os.pathsep + env[var] if env.get(var) else "")
+        with_libs(env, c.get("lib_dirs", []))
         log = self.log_path(port)
         try:   # the last run that listened stays readable (its stall report, say); one that never did is overwritten
             if self.listened.get(port, True) and log.exists():
@@ -953,6 +950,16 @@ class Workers:
         if not self.running():
             self.idle = idle_reading(gpus, ram)
         return self.idle
+
+
+def with_libs(env: dict, lib_dirs: list) -> dict:
+    """env with node.json's "lib_dirs" (where the engine's libraries are) first on LD_LIBRARY_PATH (PATH on
+    Windows)."""
+    libs = os.pathsep.join(lib_dirs)
+    if libs:
+        var = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
+        env[var] = libs + (os.pathsep + env[var] if env.get(var) else "")
+    return env
 
 
 def tail(text: str, n: int) -> list[str]:
