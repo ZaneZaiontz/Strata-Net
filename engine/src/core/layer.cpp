@@ -764,6 +764,10 @@ uint64_t kv_pool_bytes(const QsaShapes& s, int64_t pages, bool hybrid, bool int8
     return int8 ? (uint64_t) pages * s.page_size * strata::kernels::kv_q8_bytes_per_cell(s) + 64
                 : (uint64_t) pages * s.n_head_kv * s.page_size * s.head_dim * 2 * 2;
 }
+/// The pinned host copy of a streamed state's K/V: every page, in the state's format.
+uint64_t kv_host_copy_bytes(const QsaShapes& s, int64_t pages, const QsaState& st) {
+    return (uint64_t) pages * strata::kernels::kv_block_bytes(s, qsa_kv_format(st)) + 4 * 256;
+}
 }  // namespace
 
 void qsa_set_kv_resident(int64_t cells) { g_kv_resident = cells > 0 ? cells : 0; }
@@ -784,6 +788,16 @@ int64_t qsa_kv_resident_min() {
     return v;
 }
 uint64_t qsa_kv_host_bytes() { return g_kv_host_bytes; }
+uint64_t qsa_kv_host_layer_bytes(const ModelGeometry& g, int64_t max_cells) {
+    const QsaShapes s = qsa_shapes(g);
+    const KvPlan p = kv_plan(s, max_cells, 0);
+    if (p.mode == 0) return 0;
+    QsaState st{};
+    st.kv_hybrid = g_kv_hybrid;
+    st.kv_int8 = g_kv_int8 && !g_kv_q4 && !g_kv_hybrid;
+    st.kv_q4 = g_kv_q4 && !g_kv_hybrid;
+    return kv_host_copy_bytes(s, p.pages, st);
+}
 
 uint64_t qsa_state_bytes(const ModelGeometry& g, int64_t max_cells, bool with_rope, int64_t ring_cells) {
     const QsaShapes s = qsa_shapes(g);
@@ -918,7 +932,7 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     st.host = strata::kernels::KvHostPools{};
     if (p.mode != 0) {
         const uint64_t hrows = (uint64_t) pages * s.n_head_kv * s.page_size;
-        const uint64_t bytes = (uint64_t) pages * strata::kernels::kv_block_bytes(s, qsa_kv_format(st)) + 4 * 256;
+        const uint64_t bytes = kv_host_copy_bytes(s, pages, st);
         uint8_t* h = nullptr;
         uint8_t* d = nullptr;
         if ((h = kv_host_alloc(bytes)) == nullptr ||

@@ -306,6 +306,9 @@ int64_t qsa_kv_resident();
 int64_t qsa_kv_resident_min();
 /// Pinned host bytes the streamed states hold (their host copies).
 uint64_t qsa_kv_host_bytes();
+/// The pinned host bytes one streamed QSA layer's K/V copy takes at `max_cells`, as qsa_state_init allocates it
+/// under the K/V settings made so far (0: not streamed).  Allocates nothing.
+uint64_t qsa_kv_host_layer_bytes(const ModelGeometry& g, int64_t max_cells);
 /// Plan v0.3 P7: store K/V as INT8 with FP16 scales per 64 values (half the VRAM of FP16). Set before sizing and
 /// initializing the session; default off until gate G-C accepts it.
 void qsa_set_kv_int8(bool enabled);
