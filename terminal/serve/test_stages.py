@@ -7,9 +7,12 @@ make_keys; the tests that ask an agent are skipped without it).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
+import ssl
 import sys
 import tempfile
 import threading
@@ -1220,6 +1223,19 @@ for line in sys.stdin:
             sys.exit(1)
         print("T 90\nDONE 1 1 0 1 stop", flush=True)
 '''
+
+
+@unittest.skipIf(OPENSSL is None, "no openssl command to make the keys")
+class AgentKeysTest(unittest.TestCase):
+    def test_a_peer_added_later_is_pinned(self):
+        with tempfile.TemporaryDirectory() as t:
+            d = str(shutil.copytree(KEYS["main"], Path(t) / "main"))
+            fp = hashlib.sha256(ssl.PEM_cert_to_DER_cert((KEYS["stranger"] / "cert.pem").read_text())).hexdigest()
+            stages._opener(d)
+            self.assertNotIn(fp, stages._contexts[d][1].pinned)
+            (Path(d) / "peers" / "stranger.pem").write_bytes((KEYS["stranger"] / "cert.pem").read_bytes())
+            stages._opener(d)
+            self.assertIn(fp, stages._contexts[d][1].pinned)
 
 
 class EngineWiring(unittest.TestCase):
