@@ -166,18 +166,9 @@ class UnslothDefaultEnv(unittest.TestCase):
     def test_deferral_off_with_the_tail_skip(self):   # Strata Link: the deferral costs more KL than the skip
         f = setup.unsloth_default_env
         for hip in (False, True):
-            self.assertEqual(f("unsloth", "UD-Q4_K_XL", hip, False)["STRATA_VERIFY_DEFER_CPU"], "0")
-            self.assertNotIn("STRATA_VERIFY_DEFER_CPU", f("unsloth", "UD-Q4_K_XL", hip, True))
-        # Linux gfx12 keeps the tail skip (0.2.10.1), so it keeps the engine's deferral default too; Windows gfx12 keeps the 0s
-        old = setup.WIN
-        try:
-            setup.WIN = False
-            self.assertNotIn("STRATA_VERIFY_DEFER_CPU", f("unsloth", "UD-Q4_K_XL", True, False, "gfx1201"))
-            self.assertEqual(f("unsloth", "UD-Q4_K_XL", True, False, "gfx1100")["STRATA_VERIFY_DEFER_CPU"], "0")
-            setup.WIN = True
-            self.assertEqual(f("unsloth", "UD-Q4_K_XL", True, False, "gfx1201")["STRATA_VERIFY_DEFER_CPU"], "0")
-        finally:
-            setup.WIN = old
+            for in_budget in (False, True):
+                for arch in ("gfx1201", "gfx1100", ""):
+                    self.assertEqual(f("unsloth", "UD-Q4_K_XL", hip, in_budget, arch)["STRATA_VERIFY_DEFER_CPU"], "0")
 
     @mock.patch.object(setup, "WIN", False)       # "Linux" gfx12: setup asks the host OS (setup.WIN), so the test names Linux itself
     def test_tail_skip_is_off_on_every_card_and_system_too(self):
