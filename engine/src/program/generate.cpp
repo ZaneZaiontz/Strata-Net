@@ -17547,7 +17547,8 @@ int main(int argc, char** argv) {
                     if (stage_relay && !next_link.commit(n_keep, e)) return false;   // the next worker commits meanwhile
                     if (!ver.commit(n_keep, e) || !ver.wait_commit(e)) return false;
                     // the adaptive tier on this worker's layers, every adapt_every windows (the main process has its own)
-                    if (!drive.d.usage.empty() && o.adapt_every > 0 && (++wk_rounds % o.adapt_every) == 0 && !adapt(snapshot_usage())) {
+                    if (!drive.d.usage.empty() && o.adapt_every > 0 && (++wk_rounds % o.adapt_every) == 0 &&
+                        pending.empty() && !adapt(snapshot_usage())) {
                         e = "stage worker: an adaptive refill failed";
                         return false;
                     }
