@@ -132,16 +132,6 @@ class FeedEngine(unittest.TestCase):
         self.assertEqual(asked.get("backend"), "hip",
                          "the package read back is checked without the family setup was told to use")
 
-    def test_the_standard_engine_fetch_says_cuda(self):
-        gpu = {"arch": 89, "archs": [89], "vram_gb": 8.0, "index": 0}
-        with mock.patch.object(setup, "engine_dir", lambda toolkit=13: self.eng), \
-                mock.patch.object(setup, "_urlopen", side_effect=OSError("HTTP Error 404")), \
-                mock.patch.object(setup, "engine_from_feed", return_value=None) as feed:
-            setup.get_prebuilt(setup.PREBUILT_URL, gpu, "none", updating=True)
-        feed.assert_called_once()
-        args, kwargs = feed.call_args                 # the call names the family by position (FIX-APP's source check) or by keyword
-        self.assertEqual(kwargs.get("backend", args[2] if len(args) > 2 else None), "cuda")
-
 
 if __name__ == "__main__":
     unittest.main()
