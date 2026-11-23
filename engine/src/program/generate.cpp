@@ -15466,7 +15466,7 @@ int main(int argc, char** argv) {
         // - Mid-coverage (15%..65% of total layer-experts): faster 2 / 192 / 0.92 curve (+8% hit rate, +10% decode tok/s)
         //   when not explicitly overridden on the CLI.
         // - Tiny-cache (< 15% resident): anti-thrash dampening via low_vram_adapt_swaps + Zipf-head profile pinning.
-        const int64_t total_expert_pairs = g.n_layers * g.n_expert;
+        const int64_t total_expert_pairs = own_experts;
         int64_t live_gpu_slots = xcache.slots();
         for (const auto& stp : stages) live_gpu_slots += stp->cache.slots();
         {
@@ -15498,7 +15498,7 @@ int main(int argc, char** argv) {
         if (!profile.empty() && !host_res.empty() && live_gpu_slots > 0 && !all_experts_resident) {
             const int64_t pin_n = strata::core::low_vram_pin_slots(live_gpu_slots, total_expert_pairs, std::getenv("STRATA_CACHE_PIN_FRAC"));
             if (pin_n > 0) {
-                pinned_pair.assign((size_t) total_expert_pairs, 0);
+                pinned_pair.assign(host_res.size(), 0);
                 int64_t pinned_ct = 0;
                 for (size_t i = 0; i < profile.size() && pinned_ct < pin_n; ++i) {
                     const size_t idx = (size_t) profile[i].first * (size_t) g.n_expert + (size_t) profile[i].second;
