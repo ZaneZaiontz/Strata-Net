@@ -21,6 +21,7 @@ node.json (paths are this PC's):
       "expert_profile": ".../expert-profile.bin",  the model a /start that names none runs (optional with data_dir)
       "drop_cache": true,                          default: drop the model files from the page cache
       "allow_put_bin": false,                      let /put write executables (bin/, mode): the engine shipped
+      "allow_fetch": true,                         default: /fetch downloads models into data_dir
       "extra_allow": [],                           engine flags a /start may add beyond the default list
       "gpu_clocks": {"graphics": [1500, 1905], "memory": [7001, 7001]}
                                                    optional: lock the GPU's clocks (MHz) while a worker runs - for a
@@ -79,6 +80,10 @@ out, https://):
                                connection open for the next (every other answer closes it)
     GET  /ranges?path=P        the byte ranges of data_dir/P written so far ([[offset, length], ...]) and its size
     GET  /sha256?path=P        the sha256 of data_dir/P (a whole file shipped again only when it changed)
+    POST /fetch                {"repo": "owner/name", "revision": COMMIT, "files": [PATH, ...]} - tools/stage_fetch.py
+                               get into data_dir, in the background, one at a time (the same request answers the
+                               running one, another 409); {"cancel": true} ends it.  It and GET /fetch answer the
+                               job: its state (running, done, failed, cancelled), each file's state and bytes
     POST /service              {"name": NAME, "action": "start"|"stop"|"status"} - runs node.json's services[NAME]
                                [action] (one /service at a time) and answers its exit code, seconds and output's tail;
                                404 without that service, 400 without that action
@@ -91,6 +96,7 @@ import sys
 if sys.platform == "win32":
     sys.modules["_wmi"] = None
 
+import copy
 import ctypes
 import functools
 import hashlib
@@ -128,6 +134,9 @@ RESTART_STABLE_S = 600.0   # ... back to RESTART_FIRST_S after a run at least th
 
 HANDSHAKE_TIMEOUT_S = 10  # a peer's TLS handshake, as a worker allows its main process
 LINK_TEST_PATHS = {"/ping", "/sink", "/source"}
+FETCH_ENV = {"PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE", "LANG", "LC_ALL",
+             "HF_ENDPOINT", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR"}
+NO_ACQUIRE = "STRATA_NO_ACQUIRE"
 
 
 # ---------------------------------------------------------------- TLS (the stage link's keys, stage_tls.hpp)
@@ -342,13 +351,14 @@ def check_services(value) -> dict:
 class WindowsJob:
     """A job object holding a command started with CREATE_SUSPENDED and every process it starts, from the first one on,
     so that kill() ends them all.  taskkill /T walks a snapshot of the tree: a child started while it runs outlives it.
-    Not kill-on-close, so what a command leaves running when it ends in time lives on; a daemon can leave the job with
-    CREATE_BREAKAWAY_FROM_JOB, as one leaves the process group with setsid on POSIX.  Jobs nest since Windows 8, so the
-    agent may run in a job of its own.  OSError (and the command ended) when the job cannot be made."""
+    Not kill-on-close unless asked, so what a command leaves running when it ends in time lives on; a daemon can leave
+    the job with CREATE_BREAKAWAY_FROM_JOB, as one leaves the process group with setsid on POSIX.  `kill_on_close`:
+    everything in the job ends when the last handle to it closes, also when the agent dies.  Jobs nest since Windows 8,
+    so the agent may run in a job of its own.  OSError (and the command ended) when the job cannot be made."""
 
     CREATE_SUSPENDED = 0x4
 
-    def __init__(self, p: subprocess.Popen):
+    def __init__(self, p: subprocess.Popen, kill_on_close: bool = False):
         import ctypes
         from ctypes import wintypes
 
@@ -366,7 +376,7 @@ class WindowsJob:
         k32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
         k32.CloseHandle.argtypes = [wintypes.HANDLE]
         self.k32, self.job = k32, k32.CreateJobObjectW(None, None)
-        limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION(flags=LIMIT_BREAKAWAY_OK)
+        limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION(flags=LIMIT_BREAKAWAY_OK | (0x2000 if kill_on_close else 0))
         if not (self.job and k32.SetInformationJobObject(self.job, EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits),
                                                          ctypes.sizeof(limits))
                 and k32.AssignProcessToJobObject(self.job, int(p._handle))):
@@ -387,6 +397,34 @@ class WindowsJob:
         """Let go of the job; the processes still in it run on."""
         if self.job:
             self.k32.CloseHandle(self.job)
+
+
+def popen_tree(cmd: list[str], kill_on_close: bool = False, **kw) -> tuple[subprocess.Popen, WindowsJob | None]:
+    """Start `cmd` in a process group of its own (a job object on Windows, see WindowsJob for `kill_on_close`), so
+    kill_tree() ends it with what it started and still waits for (not a daemon it detached with setsid, which has a
+    session of its own)."""
+    flags = {"start_new_session": True} if os.name != "nt" else \
+        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | WindowsJob.CREATE_SUSPENDED}
+    p = subprocess.Popen(cmd, **flags, **kw)
+    return p, WindowsJob(p, kill_on_close) if os.name == "nt" else None
+
+
+def kill_tree(p: subprocess.Popen, job: WindowsJob | None) -> None:
+    """Kill a popen_tree() command and every process in its group or job.  Only while `p` is not reaped and `job` is
+    open: after that its process group or handle number can belong to someone else."""
+    try:
+        if job is None:
+            os.killpg(p.pid, signal.SIGKILL)
+        else:
+            job.kill()
+    except OSError:
+        p.kill()
+
+
+def end_tree(p: subprocess.Popen, job: WindowsJob | None) -> None:
+    """kill_tree(), then wait for it."""
+    kill_tree(p, job)
+    p.wait()
 
 
 class Services:
@@ -410,24 +448,12 @@ class Services:
             t0 = time.perf_counter()
             with tempfile.TemporaryFile() as out:
                 try:
-                    # its own process group: a timeout ends what it started and still waits for (not a daemon it
-                    # detached with setsid, which has a session of its own)
-                    kw = {"start_new_session": True} if os.name != "nt" else \
-                        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | WindowsJob.CREATE_SUSPENDED}
-                    p = subprocess.Popen(s[action], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **kw)
-                    job = WindowsJob(p) if os.name == "nt" else None
+                    p, job = popen_tree(s[action], stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
                     try:
                         rc, err = p.wait(timeout=s["timeout_s"]), None
                     except subprocess.TimeoutExpired:
                         rc, err = None, f"did not finish in {s['timeout_s']:g} s"
-                        try:
-                            if job is None:
-                                os.killpg(p.pid, signal.SIGKILL)
-                            else:
-                                job.kill()
-                        except OSError:
-                            p.kill()
-                        p.wait()
+                        end_tree(p, job)
                     if job is not None:
                         job.close()
                 except OSError as e:
@@ -443,6 +469,104 @@ class Services:
             return 200, body
         finally:
             self.lock.release()
+
+
+class Fetcher:
+    """POST /fetch: downloads into data_dir from Hugging Face by tools/stage_fetch.py get, a child process (and its
+    whole tree) of its own, one at a time.  The job, each file's state and bytes come from the child's JSON events.
+    The request is checked with stage_fetch's rules before anything starts; the child gets only the checked names on
+    its command line and only FETCH_ENV of this process's environment (a proxy, a mirror).  The job lives in this
+    process only: a stopped agent ends the child, and a restarted one knows no job until the next /fetch."""
+
+    tool = Path(__file__).resolve().parent / "stage_fetch.py"
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.job: dict | None = None
+        self.proc: subprocess.Popen | None = None
+        self.tree: WindowsJob | None = None
+
+    def status(self) -> dict:
+        with self.lock:
+            return {"ok": True, "fetch": copy.deepcopy(self.job)}
+
+    def request(self, req: dict) -> tuple[int, dict]:
+        """{"cancel": true}, or {"repo", "revision", "files"}: start that download, or answer the running one."""
+        if not self.cfg.get("data_dir"):
+            return 400, {"ok": False, "error": "this node has no data_dir"}
+        if not self.cfg.get("allow_fetch", True):
+            return 403, {"ok": False, "error": "downloads are turned off here (node.json allow_fetch)"}
+        if os.environ.get(NO_ACQUIRE, "").strip().lower() in ("1", "true", "yes", "on"):
+            return 403, {"ok": False, "error": f"downloads are forbidden in this agent's environment ({NO_ACQUIRE})"}
+        if req.get("cancel") is True:
+            self.cancel()
+            return 200, self.status()
+        import stage_fetch
+        try:
+            names = stage_fetch.check_request(req.get("repo"), req.get("revision"), req.get("files"))
+        except ValueError as e:
+            return 400, {"ok": False, "error": str(e)}
+        want = {k: req[k] for k in ("repo", "revision", "files")}
+        with self.lock:
+            if self.job is not None and self.job["state"] == "running":
+                if all(self.job[k] == v for k, v in want.items()):
+                    return 200, {"ok": True, "fetch": copy.deepcopy(self.job)}
+                return 409, {"ok": False, "error": f"another download is running: {self.job['repo']} at "
+                                                   f"{self.job['revision']}", "fetch": copy.deepcopy(self.job)}
+            cmd = [sys.executable, str(self.tool), "get", "--data-dir", str(self.cfg["data_dir"]), "--jsonl", "--",
+                   f"{want['repo']}@{want['revision']}", *want["files"]]
+            env = {k: v for k, v in os.environ.items() if k.upper() in FETCH_ENV}
+            logs = Path(self.cfg.get("log_dir") or self.cfg["data_dir"])
+            try:
+                logs.mkdir(parents=True, exist_ok=True)
+                with open(logs / "fetch.log", "w") as log:
+                    self.proc, self.tree = popen_tree(cmd, True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                      stderr=log, env={**env, "PYTHONIOENCODING": "utf-8"},
+                                                      encoding="utf-8", errors="replace")
+            except OSError as e:
+                return 500, {"ok": False, "error": f"could not start the download: {e}"}
+            self.job = {**want, "state": "running", "started_at": time.time(), "error": None, "exit_code": None,
+                        "files": {n: {"size": None, "done_bytes": 0, "state": "waiting"} for n in names}}
+            threading.Thread(target=self._follow, args=(self.proc, self.tree, self.job), daemon=True).start()
+            return 200, {"ok": True, "fetch": copy.deepcopy(self.job)}
+
+    def _follow(self, proc: subprocess.Popen, tree: WindowsJob | None, job: dict) -> None:
+        """The child's events into `job` until it ends, then its end."""
+        for line in proc.stdout:
+            try:
+                e = json.loads(line)
+                f = job["files"].get(e.get("name") or e.get("label"))
+            except (ValueError, AttributeError, TypeError):
+                continue
+            with self.lock:
+                if e.get("event") == "error":
+                    job["error"] = e.get("message")
+                elif f is not None and e.get("event") == "file":
+                    f.update(size=e.get("size"), state=e.get("state"))
+                    if f["state"] == "ok":
+                        f["done_bytes"] = f["size"]
+                elif f is not None and e.get("event") == "progress":
+                    f["done_bytes"] = e.get("done_bytes")
+        rc = proc.wait()
+        with self.lock:
+            job["exit_code"] = rc
+            if job["state"] == "running":
+                job["state"] = "done" if rc == 0 else "failed"
+            if tree is not None and self.tree is tree:
+                tree.close()
+                self.tree = None
+
+    def cancel(self) -> None:
+        """End the running download and everything it started (also when the agent stops); a child that has ended
+        already keeps its own end."""
+        with self.lock:
+            proc = self.proc
+            if self.job is None or self.job["state"] != "running" or proc.poll() is not None:
+                return
+            self.job["state"] = "cancelled"
+            kill_tree(proc, self.tree)
+        proc.wait()
 
 
 def session_args(cfg: dict) -> list[str] | None:
@@ -1143,8 +1267,10 @@ class Body:
             pass
 
 
-def make_handler(cfg: dict, workers: Workers, store: Store, services: Services | None = None):
+def make_handler(cfg: dict, workers: Workers, store: Store, services: Services | None = None,
+                 fetcher: Fetcher | None = None):
     services = services if services is not None else Services(cfg)
+    fetcher = fetcher if fetcher is not None else Fetcher(cfg)
 
     class Handler(BaseHTTPRequestHandler):
         # HTTP/1.1, but only a /put answered ok (its body read whole) keeps the connection (the shipper's next piece
@@ -1238,6 +1364,8 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                     self.reply(200, store.ranges(q["path"][0]))
                 except (KeyError, ValueError, OSError) as e:
                     self.reply(400, {"ok": False, "error": str(e)})
+            elif u.path == "/fetch":
+                self.reply(200, fetcher.status())
             elif u.path == "/log":
                 port = int(q.get("port", ["7841"])[0])
                 lines = int(q.get("lines", ["200"])[0])
@@ -1300,6 +1428,8 @@ def make_handler(cfg: dict, workers: Workers, store: Store, services: Services |
                 if req.get("pings"):
                     r["ping_ms"] = ping_ms(req["url"], cfg["_client_ctx"], int(req["pings"]))
                 self.reply(200, r)
+            elif path == "/fetch":
+                self.reply(*fetcher.request(req))
             elif path == "/service":   # one of node.json's named commands (opt-in "services")
                 code, body = services.run(req.get("name"), req.get("action"))
                 self.reply(code, body)
@@ -1359,9 +1489,9 @@ def main() -> None:
     if len(sys.argv) != 2:
         sys.exit(__doc__)
     cfg = load_config(sys.argv[1])
-    workers = Workers(cfg)
+    workers, fetcher = Workers(cfg), Fetcher(cfg)
     addr = cfg.get("agent_bind") or cfg["bind"]
-    srv = TlsServer((addr, int(cfg.get("agent_port", 7840))), make_handler(cfg, workers, Store(cfg)),
+    srv = TlsServer((addr, int(cfg.get("agent_port", 7840))), make_handler(cfg, workers, Store(cfg), fetcher=fetcher),
                     cfg["_server_ctx"], cfg)
     workers.note_idle(gpu_info(), ram_info())
     cert = ssl.PEM_cert_to_DER_cert((cfg["_tls"] / "cert.pem").read_text(encoding="ascii"))
@@ -1383,6 +1513,7 @@ def main() -> None:
             if hasattr(signal, name):
                 signal.signal(getattr(signal, name), signal.SIG_IGN)
         workers.close()
+        fetcher.cancel()
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
+import stage_fetch  # noqa: E402
 import stage_node as sn  # noqa: E402
 import stage_ship as ss  # noqa: E402
 import stage_tune as st  # noqa: E402
@@ -1365,6 +1366,16 @@ class TrustListsTest(unittest.TestCase):
         self.assertEqual(self.call(self.node, "/info"), 200)
         self.assertNotIn(hashlib.sha256(ssl.PEM_cert_to_DER_cert((self.boss / "cert.pem").read_text())).hexdigest(),
                          sn.tls_context(self.node, False).pinned)
+
+    def test_fetch_is_for_drivers_only(self):
+        self.oversee(self.boss)
+        self.serve()
+        self.assertEqual(self.call(self.neighbour, "/fetch"), 403)
+        self.assertEqual(self.call(self.neighbour, "/fetch", b'{"cancel": true}'), 403)
+        ctx = sn.tls_context(self.boss, False)
+        self.assertEqual(stage_fetch.call(self.url, ctx), {"ok": True, "fetch": None})
+        bad = {"repo": "a/b", "revision": "main", "files": ["x.gguf"]}
+        self.assertIn("commit", stage_fetch.call(self.url, ctx, bad)["error"])
 
     def test_changes_apply_without_a_restart(self):
         self.serve()
