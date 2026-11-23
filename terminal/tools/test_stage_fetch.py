@@ -294,7 +294,13 @@ class FetcherTest(unittest.TestCase):
         self.assertEqual(self.runs(), [])
 
     def test_one_at_a_time_with_progress(self):
-        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "x", "HF_ENDPOINT": "https://mirror.example"}):
+        passed, real = [], sn.popen_tree
+
+        def spy(cmd, *a, **kw):
+            passed.append(kw["env"])
+            return real(cmd, *a, **kw)
+        with mock.patch.dict(os.environ, {"SECRET_TOKEN": "x", "HF_ENDPOINT": "https://mirror.example"}), \
+                mock.patch.object(sn, "popen_tree", spy):
             code, body = self.f.request(self.req)
         self.assertEqual((code, body["fetch"]["state"]), (200, "running"))
         self.until(lambda j: all(f["done_bytes"] == 4 for f in j["files"].values()))
@@ -307,8 +313,9 @@ class FetcherTest(unittest.TestCase):
         [(argv, env)] = self.runs()
         self.assertEqual(argv, ["get", "--data-dir", str(self.tmp / "data"), "--jsonl", "--", f"{REPO}@{REV}", *FILES])
         self.assertIn("HF_ENDPOINT", env)
+        self.assertNotIn("SECRET_TOKEN", env)
         self.assertTrue((self.tmp / "data" / "fetch.log").is_file())
-        self.assertLessEqual(set(env), sn.FETCH_ENV | {"PYTHONIOENCODING"})
+        self.assertLessEqual(set(passed[0]), sn.FETCH_ENV | {"PYTHONIOENCODING"})
 
     def test_an_agent_run_with_python_i_checks_requests(self):
         load = (f"import importlib.util as u; s = u.spec_from_file_location('sn', {sn.__file__!r}); "
