@@ -604,9 +604,20 @@ It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...
 - **Node, required:** `vram_room` (free VRAM with nothing loaded, less the reserves; on the main also less the head,
   the drafter and the other weights outside the layers), `ram_room` (RAM available with nothing loaded, less what
   the engine takes besides its experts and K/V copies and a margin for the system: 3.4-3.6 GiB on the test worker,
-  the same through a 30K-token prompt; 0: no limit), `layer_ms` (GPU time per layer per decode window). **Optional:** `pf_layer_ms` (per layer per 1,000 prompt tokens), `kv_host_layer`, `pin_room`,
+  the same through a 30K-token prompt; 0: no limit), `layer_ms` (GPU time per layer per decode window). **Optional:** `pf_layer_ms` and `pf_layer_chunk_ms` (below), `kv_host_layer`, `pin_room`,
   `up_mbit`, `down_mbit`, `delay=OTHER:MS,...` (one-way, to other nodes by name). With no speed or delay on any node
   a crossing costs `hop_ms`.
+- **Prompt speed:** a node's GPU takes `pf_layer_chunk_ms` plus `pf_layer_ms` per 1,000 tokens for each of its
+  layers and each prompt chunk. Without the chunk part a fast link's prompt estimate is low at small chunks: a third
+  of the real time at chunk 368 on the test pair's LAN. To get both, read one long prompt (10K tokens or more) on the
+  LAN at two chunk sizes far apart, such as 2944 and 368. With the main the slowest part, each takes about
+  chunks x A + tokens x B ms: solve the two for A and B, then `pf_layer_chunk_ms` is A and `pf_layer_ms` is
+  1,000 x B, each divided by the main's layers. On the test pair, with 30 layers on the main, the 12,781-token runs
+  gave A = 388 ms and B = 0.373 ms, so `pf_layer_chunk_ms=12.9 pf_layer_ms=12.4`, within 16% of 24 measured
+  prompts on the LAN and two slower links. The planner's test uses a fit to all eight LAN runs instead, A = 415 and
+  B = 0.300 (13.8 and 10.0), within 7%; it also predicted the main at 38 layers within 8%, where the chunk part had
+  grown with the layers. Set both on every PC where they can be measured: one that is not the slowest part now
+  may be after a re-split.
 
 The answer has `ok`, `at` (the `--layer-split` value), `nodes` (the PCs it uses in chain order, each with its first
 and last layer, its ms per window, cached experts and RAM), `window_ms`, `decode_tok_s`, `prompt_ms`, `request_ms`
@@ -660,6 +671,7 @@ node's come from its agent's `/info` as they were the last time no worker of tha
     counted the CUDA context and their `vram_keep_mib` did not, so dropping the three facts but keeping such a
     `vram_keep_mib` makes each PC look 270 to 515 MiB roomier than it is.
   - `window_tokens`, `window_rows`, `miss_ms` and `calib`, as described above.
+  - `pf_layer_ms` and `pf_layer_chunk_ms`, in a PC entry's own `"facts"`, with `prompt_tokens` in `"facts"`.
 
   Everything in `"facts"` is written as given and wins over what was gathered, as does a PC entry's own `"facts"`
   (`layer_ms`, for one).
