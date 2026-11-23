@@ -12410,7 +12410,7 @@ int main(int argc, char** argv) {
         // Issue #4870: coverage-based adaptive tier defaults (15%..65% VRAM coverage -> 2 / 192 / 0.92 when not given).
         // Apply before reserve_exchanges so resident RAM exchange buffers match the faster mid-coverage swap rate.
         {
-            const int64_t total_pairs = g.n_layers * g.n_expert;
+            const int64_t total_pairs = own_experts;
             int64_t live_slots = xcache.slots();
             for (const auto& stp : stages) live_slots += stp->cache.slots();
             const double cov = total_pairs > 0 ? (double) live_slots / (double) total_pairs : 0.0;
