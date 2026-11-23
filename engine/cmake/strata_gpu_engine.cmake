@@ -943,6 +943,19 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     target_link_libraries(hc_q8_stream_test PRIVATE strata_prefill )
     add_test(NAME hc_q8_stream COMMAND hc_q8_stream_test)
     set_tests_properties(hc_q8_stream PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    # the STRATA_HC_Q8 window read on the tensor-core kernels (INT8 and BF16, each with its up kernel and with its down
+    # kernel too) reads its shared-memory weights with a shared load, not __ldg.  Synthetic, no model.
+    add_executable(hc_q8_tc_shared_test tests/cuda/hc_q8_tc_shared_test.cu)
+    target_link_libraries(hc_q8_tc_shared_test PRIVATE strata_prefill )
+    add_test(NAME hc_q8_tc_shared COMMAND hc_q8_tc_shared_test)
+    add_test(NAME hc_q8_tc_down_shared COMMAND hc_q8_tc_shared_test)
+    add_test(NAME hc_q8_bf16tc_shared COMMAND hc_q8_tc_shared_test)
+    add_test(NAME hc_q8_bf16tc_down_shared COMMAND hc_q8_tc_shared_test)
+    set_tests_properties(hc_q8_tc_shared hc_q8_tc_down_shared hc_q8_bf16tc_shared hc_q8_bf16tc_down_shared
+                         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
+    set_tests_properties(hc_q8_tc_down_shared PROPERTIES ENVIRONMENT "STRATA_HC_Q8_TC=2")
+    set_tests_properties(hc_q8_bf16tc_shared PROPERTIES ENVIRONMENT "STRATA_HC_Q8_TC=0")
+    set_tests_properties(hc_q8_bf16tc_down_shared PROPERTIES ENVIRONMENT "STRATA_HC_Q8_TC=0;STRATA_HC_Q8_BF16TC=2")
   endif()
   # native_expert_grouped's group stride and fused SwiGLU + q8_1, bitwise vs the launches before them (GPU, synthetic,
   # no model; --bench adds v1/new timings of a window's 48 calls in a graph)
