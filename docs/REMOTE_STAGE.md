@@ -273,6 +273,40 @@ else's invite is driven by them: joining decides who drives this PC, so `join` s
 already holds a certificate. The firewall rules for the ports and starting the agent with the PC are still
 manual.
 
+## Download the model on each PC
+
+Shipping a whole model from the main PC is slow over a home upload link. Instead, each PC's agent can download the
+model from Hugging Face itself. On the main PC:
+
+```
+python tools/stage_fetch.py start --agent https://HOST:7840 [--agent ...] REPO[@COMMIT] 'UD-IQ4_XS/*.gguf'
+python tools/stage_fetch.py status --agent https://HOST:7840 --watch
+python tools/stage_fetch.py cancel --agent https://HOST:7840
+```
+
+`start` matches the patterns against the repository's files at one commit (setup's pinned one for that repository,
+else its current one) and sends each agent the exact list. The agent downloads the files into
+`data_dir/models/<owner>--<name>/` under their Hugging Face names, one job at a time, and checks each file against
+the size and SHA-256 that huggingface.co's API gives for that commit. `start` follows the agents until they finish;
+Ctrl+C stops following, not the downloads. A stopped download resumes when the same `start` is run again, and files
+already checked are skipped. Less than 10 GiB left free after the download is refused before anything is written.
+`python tools/stage_fetch.py get REPO@COMMIT FILE... --data-dir DIR` does the same on the PC where it runs.
+
+The check protects the transfer: the files are the ones the repository holds at that commit, whatever mirror or CDN
+served them. It says nothing about the content, since the repository's owner chose both the bytes and the hash.
+Whoever picks the repository picks what the PCs run. The pack is not built yet: send it with `stage_ship.py` or build
+it on the PC.
+
+Only a PC in the agent's `overseers/` (or the PC itself) may use `/fetch`. Downloads are on by default, also on a PC
+that joined with an invite (`join` writes node.json without the setting): the main PC can make it download any
+public model repository. To turn that off, put `"allow_fetch": false` in node.json; `STRATA_NO_ACQUIRE` in the
+agent's environment turns it off too. Only public repositories work (no token is sent).
+
+If the agent stops, its download stops too. On Windows a killed agent takes its download with it. On Linux the
+download ends at its next progress line, about every 2 s while a large file downloads; in the worst case a download
+that is checking a file's SHA-256, or fetching a file under 256 MB in one stream, runs on until that file is done.
+Until it ends, a new `/fetch` into the same folder fails with "still running".
+
 ## More than two PCs (relay workers)
 
 A middle worker runs a range of layers and hands its rows to the next worker; the next worker's reply comes back
@@ -751,7 +785,8 @@ python3 terminal/tools/stage_node.py node.json
 - Other endpoints: `GET /ping`, `GET /info` (GPU with its SMs and highest clock, RAM, the clock setting, and in
   `"idle"` the free VRAM and RAM last read while no worker of this agent ran), `POST /stop`, `GET /log`, `POST /sink`,
   `GET /source` and `POST /send` (a link test; `"pings": N` adds N round trips), `POST /put`, `GET /ranges`,
-  `GET /sha256` (for `stage_ship.py`). A stop waits up
+  `GET /sha256` (for `stage_ship.py`), `POST /fetch` and `GET /fetch` (for `stage_fetch.py`,
+  [Download the model on each PC](#download-the-model-on-each-pc)). A stop waits up
   to 180 s for the worker to exit (a worker with ~30 GB of pinned experts takes more than 30 s to unpin).
 - `POST /service` (`{"name": NAME, "action": "start" | "stop" | "status"}`, opt-in): runs one of node.json's
   `"services"` - `{"NAME": {"start": [ARG, ...], "stop": [...], "status": [...], "timeout_s": 300}}` - and answers its
@@ -961,7 +996,7 @@ What it does not do:
   |---|---|
   | `/ping`, `/sink`, `/source` | allowed: the link tests the tuner runs between neighbours |
   | `/info`, `/log`, `/ranges`, `/sha256` | refused: they show the PC, its workers and its files |
-  | `/start`, `/stop`, `/put`, `/service` | refused: they run or change things on the PC |
+  | `/start`, `/stop`, `/put`, `/service`, `/fetch` | refused: they run or change things on the PC |
   | `/send` | refused: it makes the agent connect to an address of the caller's choice |
 
   The engine reads only `peers/`, so a PC that is only in `overseers/` drives the agent but does not link with its
