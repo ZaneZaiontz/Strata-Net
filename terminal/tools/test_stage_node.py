@@ -1520,12 +1520,13 @@ class PlanFactsTest(unittest.TestCase):
             Path(d, "native_experts.txt").write_text(
                 "# strata native experts v4: layer ... (n_expert 4, total 12000; ...)\n"
                 "0 18 6 0 1000 1 2 3 s.gguf\n1 18 6 4000 1024 1 2 3 s.gguf\n2 18 6 8096 2000 1 2 3 s.gguf\n")
-            args = ["--pack", d, "--native", "m.gguf", "--expert-profile", "/p.bin", "--kv-resident", "32768"]
+            args = ["--pack", d, "--native", "m.gguf", "--expert-profile", "/p.bin", "--kv-resident", "32768",
+                    "--prefill", "368"]
             with mock.patch.object(st, "qsa_interval", return_value=2):
                 f = st.model_facts(args)
             self.assertNotIn("layer_kv", st.model_facts(args[:6]))
         self.assertEqual(f, {"layers": 3, "experts": 4, "profile": "/p.bin", "slot_bytes": "1024,1024,2048",
-                             "layer_arena_bytes": "4000,4096,8000", "layer_kv": "0,1,0"})
+                             "layer_arena_bytes": "4000,4096,8000", "layer_kv": "0,1,0", "prompt_chunk": 368})
 
     def test_pc_from_its_info(self):
         info = {"gpus": [{"cuda": 1, "sms": 46, "max_clock_mhz": 2100, "free_mib": 7900},
