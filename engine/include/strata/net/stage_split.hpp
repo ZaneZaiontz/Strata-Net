@@ -34,6 +34,7 @@ struct NodeCap {
     /// one-way delay in ms to other nodes, by their name (from either node's list; missing: 0)
     std::map<std::string, double> delay_ms = {};
     double pf_layer_ms = 0;   ///< prompt time per layer per 1,000 tokens (its GPU, plus the head's work on node 0)
+    double pf_layer_chunk_ms = 0;   ///< prompt time per layer per chunk, whatever its size, on top of pf_layer_ms
 };
 
 /// What the pool measured with a split (the coordinator, after each request): per node how its layers' time compared

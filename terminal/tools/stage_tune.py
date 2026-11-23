@@ -767,7 +767,8 @@ def qsa_interval(native: str) -> int:
 def model_facts(args: list) -> dict:
     """The model facts the main config's files give: the layers, each layer's cache slot (its expert blob, rounded
     up to 256 bytes as the engine does) and its experts' arena from the pack's native_experts.txt, the expert
-    profile, and with --kv-resident the layers whose K/V a node keeps a pinned copy of (the full-attention ones)."""
+    profile, the prompt chunk (a numeric --prefill), and with --kv-resident the layers whose K/V a node keeps a pinned
+    copy of (the full-attention ones)."""
     pack = arg_value(args, "--pack")
     if not pack:
         sys.exit("stage_tune: the main config names no --pack (the planner reads the experts' sizes from it)")
@@ -777,6 +778,8 @@ def model_facts(args: list) -> dict:
     f = {"layers": len(blobs), "experts": n_expert}
     if arg_value(args, "--expert-profile"):
         f["profile"] = arg_value(args, "--expert-profile")
+    if (arg_value(args, "--prefill") or "").isdigit():
+        f["prompt_chunk"] = int(arg_value(args, "--prefill"))
     f["slot_bytes"] = ",".join(str((b + 255) // 256 * 256) for b in blobs)
     f["layer_arena_bytes"] = ",".join(str(b * n_expert) for b in blobs)
     if "--kv-resident" in args:
