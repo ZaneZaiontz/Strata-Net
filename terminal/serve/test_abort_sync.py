@@ -12,7 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+TERMINAL = Path(__file__).resolve().parents[1]
+if str(TERMINAL) not in sys.path:
+    sys.path.insert(0, str(TERMINAL))
+
 from serve import server
 
 FAKE = r'''import queue, sys, threading, time
