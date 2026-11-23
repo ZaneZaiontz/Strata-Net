@@ -95,6 +95,16 @@ static void test_fixed_split() {
     CHECK(!full.ok && full.why.find("laptop's RAM") != std::string::npos);
 }
 
+/// A node's prompt facts: each chunk costs every layer of it pf_layer_chunk_ms plus pf_layer_ms per 1,000 tokens.
+static void test_prompt_facts() {
+    SplitFacts f;
+    const SplitPlan p = plan_of(kModel + "prompt_tokens=1000 prompt_chunk=500\n"
+                                         "node=a vram_room=1 ram_room=0 layer_ms=0.5 pf_layer_ms=10 "
+                                         "pf_layer_chunk_ms=20\n", f);
+    CHECK(p.ok && std::fabs(p.prompt_ms - 2 * 8 * (20 + 5)) < 1e-9);
+    CHECK(split_plan_json(f, p).find("\"pf_layer_chunk_ms\":20") != std::string::npos);
+}
+
 /// Measured timings in SplitCalib's text: the window is the coordinator's fixed time, the network's and each node's
 /// predicted time times its scale, and the plan says it is measured.  The search keeps the nodes' order.
 static void test_calib() {
@@ -157,6 +167,7 @@ int main() {
     test_link_facts();
     test_three_pcs();
     test_fixed_split();
+    test_prompt_facts();
     test_calib();
     test_bad_facts();
     if (failures) {

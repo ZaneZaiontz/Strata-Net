@@ -120,7 +120,8 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
                 const std::map<std::string, double*> reals = {{"layer_ms", &node->layer_ms},
                                                               {"up_mbit", &node->up_mbit},
                                                               {"down_mbit", &node->down_mbit},
-                                                              {"pf_layer_ms", &node->pf_layer_ms}};
+                                                              {"pf_layer_ms", &node->pf_layer_ms},
+                                                              {"pf_layer_chunk_ms", &node->pf_layer_chunk_ms}};
                 if (!node_seen.insert(k).second) return fail(k + " is given twice for node " + node->name);
                 const auto i = ints.find(k);
                 const auto r = reals.find(k);
@@ -314,6 +315,7 @@ std::string split_plan_json(const SplitFacts& f, const SplitPlan& p) {
         whole("ram_room", n.ram_room);
         real("layer_ms", n.layer_ms);
         real("pf_layer_ms", n.pf_layer_ms);
+        real("pf_layer_chunk_ms", n.pf_layer_chunk_ms);
         whole("kv_host_layer", n.kv_host_layer);
         whole("pin_room", n.pin_room);
         real("up_mbit", n.up_mbit);
