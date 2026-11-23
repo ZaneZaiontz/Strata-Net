@@ -1094,6 +1094,8 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
+    /// --plan-sizes: print what a range of layers takes besides its experts and exit before loading anything
+    bool plan_sizes = false;
     int adapt_swaps = 96;
     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
     /// prompt again, the v0.1.2 behaviour).  One is the GDN recurrence of the 36 layers, the QSA indexer tails and
@@ -4057,6 +4059,7 @@ int main(int argc, char** argv) {
         else if (a == "--pcie-mode") o.pcie_mode = next("--pcie-mode");
         else if (a == "--serve") { o.serve = true; strata::core::set_serve_error_line(true); }   // #6054: a check that fails ends at once, with an ERR line
         else if (a == "--vision") o.vision = true;
+        else if (a == "--plan-sizes") o.plan_sizes = true;
         else if (a == "--session-save-reclaim") o.session_save_reclaim = true;
         else if (a == "--prompt-cache") {
             o.prompt_cache = std::max(0, std::atoi(next("--prompt-cache")));
@@ -5740,7 +5743,7 @@ int main(int argc, char** argv) {
         }
     }
     strata::core::NativeEmbed native_embed;
-    if (native_pack) {
+    if (native_pack && !o.plan_sizes) {
         if (o.native_preset.empty() || o.spec < 2 || o.keep_canonical ||
             (o.prefill_chunk <= 0 && o.tokens.size() > 1)) {
             std::fprintf(stderr, "strata generate: %s is a native (IQ) pack: it needs --native SHARD1, --spec T (T >= 2) "
@@ -5955,6 +5958,36 @@ int main(int argc, char** argv) {
     if (!strata::core::WeightTable::pool_bytes(o.pack, pool_bytes, err, skip.empty() ? nullptr : &skip)) {
         std::fprintf(stderr, "strata generate: %s\n", err.c_str());
         return 1;
+    }
+    if (o.plan_sizes) {
+        std::set<std::string> every;
+        std::ifstream index(o.pack + "/index.txt");
+        for (std::string line, name; std::getline(index, line);)
+            if (line[0] != '#' && std::istringstream(line) >> name) every.insert(name);
+        strata::core::WeightTable shapes;
+        std::string why;
+        bool ok = shapes.load(o.pack, nullptr, 0, why, &every);
+        std::vector<uint64_t> upto((size_t) g.n_layers + 1);
+        for (int64_t le = 0; ok && le <= g.n_layers; ++le) {
+            std::set<std::string> sk = skip_base;
+            add_foreign(0, le, sk, o.mmap_experts);
+            uint64_t arena_b = 0, dense_b = 0;
+            ok = strata::core::WeightTable::pool_bytes(o.pack, arena_b, why, &sk) &&
+                 (o.native_dense_gguf.empty() || strata::core::NativeDense::weight_bytes_for(
+                                                     o.native_dense_gguf, shapes, o.native_ple_key, 0, le, dense_b, why));
+            upto[(size_t) le] = strata::core::session_bytes(g, o.max_context, K, 0, le) + arena_b + dense_b;
+        }
+        if (!ok) {
+            std::fprintf(stderr, "strata generate: --plan-sizes: %s\n", why.c_str());
+            return 1;
+        }
+        std::string list;
+        for (int64_t l = 0; l < g.n_layers; ++l)
+            list += (list.empty() ? "" : ",") + std::to_string(upto[(size_t) l + 1] - upto[(size_t) l]);
+        std::printf("session_base_bytes=%llu\nsession_layer_bytes=%s\nkv_host_layer=%llu\n",
+                    (unsigned long long) upto[0], list.c_str(),
+                    (unsigned long long) strata::core::qsa_kv_host_layer_bytes(g, o.max_context));
+        return 0;
     }
     void* arena = nullptr;
     if (const cudaError_t ce = cudaMalloc(&arena, pool_bytes); ce != cudaSuccess) {

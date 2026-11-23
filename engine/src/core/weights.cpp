@@ -254,8 +254,8 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
     // one of the 90 widened tensors - a heap corruption that would have been blamed on whatever ran next.
     void* stage_in = nullptr;
     void* stage_out = nullptr;
-    if (cudaHostAlloc(&stage_in, CHUNK, cudaHostAllocDefault) != cudaSuccess ||
-        cudaHostAlloc(&stage_out, CHUNK * 2, cudaHostAllocDefault) != cudaSuccess) {
+    if (pool > 0 && (cudaHostAlloc(&stage_in, CHUNK, cudaHostAllocDefault) != cudaSuccess ||
+                     cudaHostAlloc(&stage_out, CHUNK * 2, cudaHostAllocDefault) != cudaSuccess)) {
         err = "cudaHostAlloc for the staging buffers failed";
         if (stage_in) cudaFreeHost(stage_in);
         if (stage_out) cudaFreeHost(stage_out);
@@ -506,7 +506,7 @@ bool WeightTable::load(const std::string& pack_dir, void* arena_base, uint64_t a
     report_.arena_bytes = pool;
     report_.read_ms = now_ms() - t_read0 - upload_ms;
     report_.upload_ms = upload_ms;
-    if (cudaDeviceSynchronize() != cudaSuccess) { err = "cudaDeviceSynchronize after the load failed"; return false; }
+    if (pool > 0 && cudaDeviceSynchronize() != cudaSuccess) { err = "cudaDeviceSynchronize after the load failed"; return false; }
     return true;
 }
 

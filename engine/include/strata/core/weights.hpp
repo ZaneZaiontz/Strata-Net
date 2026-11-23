@@ -131,6 +131,7 @@ public:
     /// because the failure mode otherwise is a device write past the end of the arena.
     /// With `skip`, the named tensors are not read: their rows keep their metadata with `data == nullptr` and
     /// `resident == false`, and the other tensors are packed into the compacted arena `pool_bytes` sized.
+    /// With every tensor skipped it reads the index only and needs no device (the shapes, for sizing).
     bool load(const std::string& pack_dir, void* arena_base, uint64_t arena_bytes, std::string& err,
               const std::set<std::string>* skip = nullptr);
 
