@@ -614,8 +614,12 @@ It answers `{"ok":true,"at":[31],"nodes":[{"name":"main","first":0,"last":30,...
   `profile` with `experts` (the expert profile the main runs with: without one no cache fills, so VRAM does not
   limit the plan), and the planner's workload and link settings, whose defaults and meaning are in
   `engine/include/strata/net/stage_split.hpp`: `window_tokens`, `window_rows`, `row_bytes`, `ring`,
-  `hop_overhead_ms`, `hop_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_rows`,
-  `answer_tokens`, `kv_copies`, `first_min`.
+  `hop_overhead_ms`, `hop_ms`, `prompt_tokens`, `prompt_chunk`, `prompt_row_bytes`, `drafter_row_bytes`,
+  `drafter_rows`, `answer_tokens`, `kv_copies`, `first_min`. The three row sizes are the three streams of
+  `STRATA_REMOTE_ROWS`: `row_bytes` the windows', `prompt_row_bytes` the prompt rows going out and
+  `drafter_row_bytes` the ones coming back (unset: `prompt_row_bytes`). Their defaults are fp32 rows, but the engine
+  sends the rows coming back as bf16 unless told otherwise, so for its default formats give half of
+  `prompt_row_bytes` there (20480). On the test pair that took a 4K prompt over 20 Mbit/s from 40% high to within 1%.
 - **A split of your own:** `at=30` (or `at=16,32` for three PCs) scores that split over every node in the order
   given instead of searching, so a split you chose gets the same estimate.
 - **Measured timings:** a line `calib windows=N fixed_ms=MS net_ms=MS scale=S,S,... seen=K` in the text of StrataPool's
