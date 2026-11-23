@@ -672,8 +672,9 @@ node's come from its agent's `/info` as they were the last time no worker of tha
   `--kv-resident`, `layer_kv` (the full-attention layers, from the GGUF's `full_attention_interval`); from its env
   over this shell's, half the fp32 row size for each stream `STRATA_REMOTE_ROWS` sends as bf16 (the size given in
   `"facts"`, else the planner's), so `drafter_row_bytes=20480` with nothing set.
-- **From the engine:** `session_base_bytes`, `session_layer_bytes` (a range's session state and dense weights) and
-  `kv_host_layer`, from `strata --serve ARGS --plan-sizes` with the main's `exe` and the main config's args and env.
+- **From the engine:** `session_base_bytes`, `session_layer_bytes` (a range's session state and dense weights),
+  `kv_host_layer` and a default `vram_keep_mib` for the main and for the nodes (below), from `strata --serve ARGS
+  --plan-sizes` with the main's `exe` and the main config's args and env.
   It sizes them as a load does, prints them and exits before loading anything; it gave the same answer with the GPU
   driver hidden from it. Every session holds one full-attention state even without such a layer, so the base keeps
   it: a range that holds such layers but not the first one is priced one state high. On the test pair that state
@@ -690,23 +691,27 @@ node's come from its agent's `/info` as they were the last time no worker of tha
 - **Given in cluster.json**, since they need a real run:
 
 ```json
-"main": {"config": "...", "exe": "...", "vram_keep_mib": 3493, "ram_keep_mib": 6144},
-"nodes": [{"name": "worker", "agent": "...", "host": "...", "vram_keep_mib": 1225, "ram_keep_mib": 6144}],
+"main": {"config": "...", "exe": "...", "ram_keep_mib": 6144},
+"nodes": [{"name": "worker", "agent": "...", "host": "...", "ram_keep_mib": 6144}],
 "plan": {"facts": {"window_tokens": 1.83, "window_rows": 2, "answer_tokens": 400, "miss_ms": 76},
          "calib": "windows=384 fixed_ms=17.1 net_ms=3.7 scale=0.705,0.705 seen=30"}
 ```
 
-  - `vram_keep_mib`: the VRAM the engine takes or keeps free besides what `--plan-sizes` gives for its layers: the
-    CUDA context, the reserves of its line `expert cache auto: ... N MiB reserved (+N MiB for the draft head, +N MiB
-    for what is allocated after the cache)` and on the main the drafter and the head. From a run: the idle free
-    VRAM less the free VRAM in that line and the engine's sizes for that PC's layers, plus the line's reserves.
-    3493 MiB on the test main, 1225 on the worker.
+  - `vram_keep_mib`, optional: the VRAM the engine takes or keeps free besides what `--plan-sizes` gives for its
+    layers: the CUDA context, the reserves of its line `expert cache auto: ... N MiB reserved (+N MiB for the draft
+    head, +N MiB for what is allocated after the cache)` and on the main the drafter and the head. Without it the
+    engine's default is used, from the constants its own layer split plans with (a 1,550 MiB context, the reserves,
+    and on the main a 410 MiB head and a 1,000 MiB drafter; a node takes `--vram-reserve-later-mib`, else
+    `--vram-reserve-mib`, of the main config). That default is safe but high: 4475 and 3161 MiB on the test pair,
+    982 and 1936 MiB above the values read off a run, so the caches are planned too small; the tool says so for each
+    PC that gets it. From a run: the idle free VRAM less the free VRAM in that line and the engine's sizes for that
+    PC's layers, plus the line's reserves (3493 MiB on the test main, 1225 on the worker).
   - `ram_keep_mib`: what the engine takes besides its experts and K/V copies, plus a margin (see `ram_room` above).
   - `session_base_bytes`, `session_layer_bytes` and `kv_host_layer` may still be given (the last in `"node_facts"`),
     and then win; with all three given the engine is not asked. The hand-made `session_base_bytes` of older files
     counted the CUDA context and their `vram_keep_mib` did not, so dropping the three facts but keeping such a
     `vram_keep_mib` makes each PC look 270 to 515 MiB roomier than it is.
-  - `window_tokens`, `window_rows`, `miss_ms` and `calib`, as described above.
+  - `window_tokens`, `window_rows`, `miss_ms` and `calib`, as described above. No memory fact needs a real run.
   - `pf_layer_ms` and `pf_layer_chunk_ms`, in a PC entry's own `"facts"`, with `prompt_tokens` in `"facts"`.
 
   Everything in `"facts"` is written as given and wins over what was gathered, as does a PC entry's own `"facts"`
@@ -715,8 +720,10 @@ node's come from its agent's `/info` as they were the last time no worker of tha
 On the test pair it wrote the hand-made file behind the example above, except for the links it measured (937 and 887
 Mbit/s where 941 was assumed, 0.36 ms against 0.2) and the free memory of the day (within 0.2%), and the planner
 gave the same split at 31 with 33.5 ms a window against 33.1. With the engine's sizes it chose 31 too, and its expert
-cache sizes there were within 3 slots of a real load's. Where an agent is older than the tool (no `idle` or
-GPU speed in `/info`, no `/source`, no round trips from `/send`) it stops and names that agent: update it.
+cache sizes there were within 3 slots of a real load's. With no memory value in cluster.json at all it still chose
+31, but planned 1,016 and 2,798 cached experts where a real load had 1,439 and 3,607. Where an agent is older than the
+tool (no `idle` or GPU speed in `/info`, no `/source`, no round trips from `/send`) it stops and names that agent:
+update it.
 
 ## Tools
 

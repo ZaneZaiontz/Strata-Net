@@ -1094,7 +1094,8 @@ struct Options {
     bool serve = false;
     /// The vision path: keep a per-cell (t, h, w) rotary position table so --serve can take GENI requests.
     bool vision = false;
-    /// --plan-sizes: print what a range of layers takes besides its experts and exit before loading anything
+    /// --plan-sizes: print what a range of layers takes besides its experts, and a default VRAM keep for a main and
+    /// a remote node from the spill walk's constants, and exit before loading anything
     bool plan_sizes = false;
     int adapt_swaps = 96;
     /// --serve: how many conversation checkpoints to keep between requests (0 = every request reads its whole
@@ -5987,6 +5988,14 @@ int main(int argc, char** argv) {
         std::printf("session_base_bytes=%llu\nsession_layer_bytes=%s\nkv_host_layer=%llu\n",
                     (unsigned long long) upto[0], list.c_str(),
                     (unsigned long long) strata::core::qsa_kv_host_layer_bytes(g, o.max_context));
+        namespace sw = strata::program::split_walk;
+        namespace sr = strata::program::stage_reserve;
+        const int64_t keep_main = sw::kContextMib + o.vram_reserve_mib + sw::kStageLateAllocMib +
+                                  (o.native_head_gguf.empty() ? 0 : 410) +
+                                  (!o.mtp.empty() || o.draft == "dflash2" ? sr::kDrafterMib : 0);
+        const int64_t keep_node = sw::kContextMib + sw::kStageLateAllocMib + sr::kWindowMib +
+                                  (o.vram_reserve_later_mib >= 0 ? o.vram_reserve_later_mib : o.vram_reserve_mib);
+        std::printf("vram_keep_main_mib=%lld\nvram_keep_node_mib=%lld\n", (long long) keep_main, (long long) keep_node);
         return 0;
     }
     void* arena = nullptr;

@@ -1544,6 +1544,9 @@ class PlanFactsTest(unittest.TestCase):
                 "idle": {"free_mib": [7900, 9800], "available_mib": 60000}}
         f = st.pc_facts("main", info, {"vram_keep_mib": 800, "ram_keep_mib": 6144})
         self.assertEqual(f, {"vram_room": 9000 << 20, "ram_room": (60000 - 6144) << 20, "layer_ms": 0.508})
+        with mock.patch.object(st, "say") as say:
+            self.assertEqual(st.pc_facts("main", info, {"ram_keep_mib": 6144}, "800"), f)
+        self.assertRegex(say.call_args.args[0], "main: no vram_keep_mib given.*800 MiB.*pessimistic")
         self.assertNotIn("layer_ms", st.pc_facts("main", info, {"vram_keep_mib": 0, "ram_keep_mib": 0,
                                                                 "facts": {"layer_ms": 0.3}}))
         with self.assertRaisesRegex(SystemExit, "no idle memory .* update it"):
@@ -1565,22 +1568,25 @@ class PlanFactsTest(unittest.TestCase):
 
     def test_sizes_from_the_engine(self):
         cfg = {"args": ["--pack", "/p"], "env": {"STRATA_HC_Q8": "1"}, "cwd": "/srv"}
-        out = "strata: a note\nsession_base_bytes=5\nsession_layer_bytes=1,2\nkv_host_layer=7\n"
+        out = ("strata: a note\nsession_base_bytes=5\nsession_layer_bytes=1,2\nkv_host_layer=7\n"
+               "vram_keep_main_mib=4000\nvram_keep_node_mib=3000\n")
         with mock.patch.object(st.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=out, stderr="")) as run:
-            f = st.engine_facts("/strata", cfg, {"facts": {"session_base_bytes": 9}})
-            self.assertEqual(f, {"session_base_bytes": "5", "session_layer_bytes": "1,2", "kv_host_layer": "7"})
+            f = st.engine_facts("/strata", cfg, {"session_base_bytes"})
+            self.assertEqual(f, {"session_base_bytes": "5", "session_layer_bytes": "1,2", "kv_host_layer": "7",
+                                 "vram_keep_main_mib": "4000", "vram_keep_node_mib": "3000"})
             self.assertEqual(run.call_args.args[0], ["/strata", "--serve", "--pack", "/p", "--plan-sizes"])
             self.assertEqual(run.call_args.kwargs["env"]["STRATA_HC_Q8"], "1")
             self.assertEqual(run.call_args.kwargs["cwd"], "/srv")
             run.reset_mock()
-            given = {"facts": {"session_base_bytes": 9, "session_layer_bytes": 3}, "node_facts": {"kv_host_layer": 4}}
-            self.assertEqual(st.engine_facts("/strata", cfg, given), {})
+            known = {"session_base_bytes", "session_layer_bytes", "kv_host_layer", "vram_keep_main_mib",
+                     "vram_keep_node_mib"}
+            self.assertEqual(st.engine_facts("/strata", cfg, known), {})
             run.assert_not_called()
         with mock.patch.object(st.subprocess, "run", return_value=mock.Mock(returncode=2, stdout="", stderr="bad flag")):
             with self.assertRaisesRegex(SystemExit, "--plan-sizes failed (?s:.*)bad flag"):
-                st.engine_facts("/strata", cfg, {})
+                st.engine_facts("/strata", cfg, set())
         with self.assertRaisesRegex(SystemExit, "no-strata --plan-sizes: "):
-            st.engine_facts(str(Path(__file__).with_name("no-strata")), {"args": []}, {})
+            st.engine_facts(str(Path(__file__).with_name("no-strata")), {"args": []}, set())
 
 
 if __name__ == "__main__":
