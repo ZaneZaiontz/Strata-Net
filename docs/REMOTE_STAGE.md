@@ -243,6 +243,36 @@ rank goes in the hello and every worker uses it, as the stages of a split in one
 so in one line when its own differed). The other routing variables that change answers
 (`STRATA_ROUTE_PRIOR`, `STRATA_ROUTE_RESIDENT` and their kin) are not sent: set them alike on every PC.
 
+## Join with an invite
+
+`terminal/tools/stage_join.py` does step 1 above and a worker's `node.json` without copying anything by hand. On the
+main PC:
+
+```
+python tools/stage_join.py invite --address HOST
+```
+
+It prints one line starting with `strata-net:` and waits until one PC joins, the invite expires (1 hour) or you
+press Ctrl+C. Send that line to the other PC's owner, who runs:
+
+```
+python tools/stage_join.py join strata-net:...
+python tools/stage_node.py ~/strata-node/node.json
+```
+
+Both sides use `~/strata-node/node.json` unless given another (its `tls_dir`, else `stage-tls/` next to it) and make
+the key with this install's engine when there is none. Afterwards the main PC has the worker's certificate in
+`peers/`; the worker has the main PC's in `peers/` and in `overseers/`, so only the main PC drives its agent, and a
+`node.json` if it had none. Point the main PC's `STRATA_STAGE_TLS` at the same key folder. `--address` is what the
+worker connects to: a LAN address, a forwarded port or a tailnet address (`HOST:PORT`, IPv4, port 7839 by default).
+The listener runs only while an invite waits.
+
+The invite is a secret until it is used: whoever has it can join first. The worker checks the main PC's certificate
+against the fingerprint in the invite, so nobody in between can stand in for it, but a worker that joins someone
+else's invite is driven by them: joining decides who drives this PC, so `join` stops on a PC whose `overseers/`
+already holds a certificate. The firewall rules for the ports and starting the agent with the PC are still
+manual.
+
 ## More than two PCs (relay workers)
 
 A middle worker runs a range of layers and hands its rows to the next worker; the next worker's reply comes back
@@ -841,10 +871,8 @@ connection only with this PC's certificate in its own `peers/`. For the main PC'
 certificates the link already exchanges; a relay's next worker links with the relay, not with this PC, so its agent
 is reached only once the two PCs hold each other's `cert.pem` too.
 No proxy, no plain HTTP, and a redirect is not followed. An agent that refuses, or one this PC does not accept, shows
-its TLS error on the card. The run config and the key folder are read when the server starts, and the agents'
-TLS context is kept for as long as it runs: after a new key (`strata --stage-keygen`) or a change in `peers/`,
-restart the server, or the card keeps the old certificates (and shows the agent's refusal once the agent has the new
-ones).
+its TLS error on the card. The run config is read when the server starts. The key folder is read again when it
+changes, so a PC that joined later (`tools/stage_join.py`) or a new key is picked up without a restart.
 
 ## What is turned off or refused
 
