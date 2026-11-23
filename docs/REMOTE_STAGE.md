@@ -669,7 +669,9 @@ node's come from its agent's `/info` as they were the last time no worker of tha
 
 - **From the main config's files:** `layers`, `experts`, `slot_bytes` and `layer_arena_bytes` from the pack's
   `native_experts.txt`; `profile` from `--expert-profile`; `prompt_chunk` from a numeric `--prefill`; with
-  `--kv-resident`, `layer_kv` (the full-attention layers, from the GGUF's `full_attention_interval`).
+  `--kv-resident`, `layer_kv` (the full-attention layers, from the GGUF's `full_attention_interval`); from its env
+  over this shell's, half the fp32 row size for each stream `STRATA_REMOTE_ROWS` sends as bf16 (the size given in
+  `"facts"`, else the planner's), so `drafter_row_bytes=20480` with nothing set.
 - **From the engine:** `session_base_bytes`, `session_layer_bytes` (a range's session state and dense weights) and
   `kv_host_layer`, from `strata --serve ARGS --plan-sizes` with the main's `exe` and the main config's args and env.
   It sizes them as a load does, prints them and exits before loading anything; it gave the same answer with the GPU
