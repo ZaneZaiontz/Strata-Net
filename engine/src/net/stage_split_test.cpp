@@ -321,17 +321,20 @@ static void test_slow_link_measurement() {
 }
 
 /// The prompt estimate against the slow-link tuning runs: the same two PCs, all rows bf16, prompts of 4,188 and 12,781
-/// tokens in chunks of 2,944 to 368, over the LAN, link A (15 ms, 20 Mbit/s each way) and link C (5 ms, 300 Mbit/s).
-/// The main's 415 ms a chunk plus 0.300 ms a token over its 30 layers are fitted to the LAN runs; A and C are not.
+/// tokens in chunks of 2,944 to 368, over the LAN, link A (15 ms, 20 Mbit/s each way) and link C (5 ms, 300 Mbit/s),
+/// and with the engine's default rows (fp32 out, bf16 back) over the LAN and link A.  The main's 415 ms a chunk plus
+/// 0.300 ms a token over its 30 layers are fitted to the LAN runs with bf16 rows; the rest are not.
 /// Then the 12,781-token prompt on the LAN with 38 layers on the main, where the chunk cost grew with the layers: a
 /// cost per chunk that stayed with the main whatever its layers would be 20% low there.  Measured is the mean of each
 /// setting's runs.  Every run within 20%.
 static void test_prompt_measurement() {
-    struct Link { const char* name; double delay, mbit; };
-    const Link links[] = {{"LAN", 0, 0}, {"A", 15, 20}, {"C", 5, 300}};
+    struct Link { const char* name; double delay, mbit; int64_t out_row; };
+    const Link links[] = {{"LAN", 0, 0, 20480}, {"A", 15, 20, 20480}, {"C", 5, 300, 20480},
+                          {"LAN defaults", 0, 0, 40960}, {"A defaults", 15, 20, 40960}};
     auto check = [](const Link& l, int64_t tokens, int64_t chunk, int64_t at, double measured) {
         SplitModel m;
-        m.prompt_row_bytes = 20480;
+        m.prompt_row_bytes = l.out_row;
+        m.drafter_row_bytes = 20480;
         m.prompt_tokens = tokens;
         m.prompt_chunk = chunk;
         NodeCap main_pc{"main", 0, 0, 0.5}, worker{"worker", 0, 0, 0.5};
@@ -341,17 +344,21 @@ static void test_prompt_measurement() {
         main_pc.delay_ms["worker"] = l.delay;
         main_pc.up_mbit = main_pc.down_mbit = worker.up_mbit = worker.down_mbit = l.mbit;
         const double s = evaluate_split(m, {main_pc, worker}, {at}).prompt_ms / 1000.0;
-        std::printf("%-3s %5lld tokens, chunk %4lld, main %lld layers: prompt %6.2f s (measured %6.2f)\n", l.name,
+        std::printf("%-12s %5lld tokens, chunk %4lld, main %lld layers: prompt %6.2f s (measured %6.2f)\n", l.name,
                     (long long) tokens, (long long) chunk, (long long) at, s, measured);
         CHECK(std::fabs(s / measured - 1.0) <= 0.2);
     };
-    struct Row { int64_t tokens, chunk; double measured[3]; };
-    const Row rows[] = {{4188, 2944, {3.20, 60.7, 5.90}},    {4188, 1472, {3.40, 48.0, 4.55}},
-                        {4188, 736, {4.27, 41.7, 4.75}},     {4188, 368, {6.13, 38.5, 6.40}},
-                        {12781, 2944, {6.70, 131.1, 10.50}}, {12781, 1472, {8.30, 118.4, 9.45}},
-                        {12781, 736, {11.90, 112.1, 12.35}}, {12781, 368, {18.33, 108.9, 18.70}}};
+    struct Row { int64_t tokens, chunk; double measured[5]; };
+    const Row rows[] = {{4188, 2944, {3.20, 60.7, 5.90, 3.70, 84.9}},
+                        {4188, 1472, {3.40, 48.0, 4.55, 3.60, 80.5}},
+                        {4188, 736, {4.27, 41.7, 4.75, 4.37, 74.1}},
+                        {4188, 368, {6.13, 38.5, 6.40, 6.20, 71.85}},
+                        {12781, 2944, {6.70, 131.1, 10.50, 7.20, 227.8}},
+                        {12781, 1472, {8.30, 118.4, 9.45, 8.47, 219.4}},
+                        {12781, 736, {11.90, 112.1, 12.35, 12.00, 214.8}},
+                        {12781, 368, {18.33, 108.9, 18.70, 18.53, 212.9}}};
     for (const Row& r : rows)
-        for (int k = 0; k < 3; ++k) check(links[k], r.tokens, r.chunk, 30, r.measured[k]);
+        for (int k = 0; k < 5; ++k) check(links[k], r.tokens, r.chunk, 30, r.measured[k]);
     check(links[0], 12781, 2944, 38, 8.09);
     check(links[0], 12781, 736, 38, 15.75);
     check(links[0], 12781, 368, 38, 24.71);

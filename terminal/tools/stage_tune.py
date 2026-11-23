@@ -788,6 +788,20 @@ def model_facts(args: list) -> dict:
     return f
 
 
+def row_facts(env: dict, given: dict | None = None) -> dict:
+    """The row sizes of the streams the main's env sends as bf16, read as the engine reads STRATA_REMOTE_ROWS and its
+    per-stream overrides (unset: only the prompt rows coming back): half the fp32 size, the one `given` (cluster.json's
+    "facts") has for row_bytes or prompt_row_bytes, else the planner's."""
+    given = given or {}
+    f = {}
+    for key, stream, base, fp32, default in (("row_bytes", "WINDOW", "row_bytes", 51216, "fp32"),
+                                             ("prompt_row_bytes", "PROMPT", "prompt_row_bytes", 40960, "fp32"),
+                                             ("drafter_row_bytes", "DRAFT", "prompt_row_bytes", 40960, "bf16")):
+        if (env.get("STRATA_REMOTE_ROWS_" + stream) or env.get("STRATA_REMOTE_ROWS") or default) == "bf16":
+            f[key] = int(given.get(base, fp32)) // 2
+    return f
+
+
 def pc_facts(name: str, info: dict, spec: dict) -> dict:
     """A PC's own facts from its /info (this PC's read here) and its cluster.json entry: the free VRAM of CUDA's first
     GPU and the available RAM while no worker ran, less the entry's vram_keep_mib and ram_keep_mib, and the GPU's
@@ -860,7 +874,9 @@ def plan(cluster: dict, out: Path, facts_only: bool) -> None:
     cfg = json.loads(Path(main["config"]).read_text(encoding="utf-8"))
     sizes = engine_facts(main["exe"], cfg, given)
     kv = {k: sizes.pop(k) for k in ["kv_host_layer"] if k in sizes}
-    lines = [f"{k}={v}" for k, v in {**model_facts(cfg["args"]), **sizes, **given.get("facts", {})}.items()]
+    rows = row_facts({**os.environ, **cfg.get("env", {})}, given.get("facts", {}))
+    gathered = {**model_facts(cfg["args"]), **rows, **sizes}
+    lines = [f"{k}={v}" for k, v in {**gathered, **given.get("facts", {})}.items()]
     if given.get("calib"):
         lines.append("calib " + given["calib"])
     for name, info, spec in pcs:

@@ -1528,6 +1528,16 @@ class PlanFactsTest(unittest.TestCase):
         self.assertEqual(f, {"layers": 3, "experts": 4, "profile": "/p.bin", "slot_bytes": "1024,1024,2048",
                              "layer_arena_bytes": "4000,4096,8000", "layer_kv": "0,1,0", "prompt_chunk": 368})
 
+    def test_rows_from_the_env(self):
+        bf16 = {"row_bytes": 25608, "prompt_row_bytes": 20480, "drafter_row_bytes": 20480}
+        self.assertEqual(st.row_facts({}), {"drafter_row_bytes": 20480})
+        self.assertEqual(st.row_facts({"STRATA_REMOTE_ROWS": "bf16"}), bf16)
+        self.assertEqual(st.row_facts({"STRATA_REMOTE_ROWS": "bf16", "STRATA_REMOTE_ROWS_WINDOW": ""}), bf16)
+        self.assertEqual(st.row_facts({"STRATA_REMOTE_ROWS_DRAFT": "fp32"}), {})
+        self.assertEqual(st.row_facts({"STRATA_REMOTE_ROWS": "bf16", "STRATA_REMOTE_ROWS_PROMPT": "fp32"}),
+                         {"row_bytes": 25608, "drafter_row_bytes": 20480})
+        self.assertEqual(st.row_facts({}, {"prompt_row_bytes": 61440}), {"drafter_row_bytes": 30720})
+
     def test_pc_from_its_info(self):
         info = {"gpus": [{"cuda": 1, "sms": 46, "max_clock_mhz": 2100, "free_mib": 7900},
                          {"cuda": 0, "sms": 68, "max_clock_mhz": 2100, "free_mib": 9800}],

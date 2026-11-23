@@ -71,6 +71,7 @@ bool parse_split_facts(const std::string& text, SplitFacts& f, std::string& err)
         {"layers", &m.n_layers},           {"first_min", &m.first_min},         {"kv_copies", &m.kv_copies},
         {"window_rows", &m.window_rows},   {"row_bytes", &m.row_bytes},         {"ring", &ring},
         {"prompt_row_bytes", &m.prompt_row_bytes}, {"prompt_chunk", &m.prompt_chunk},
+        {"drafter_row_bytes", &m.drafter_row_bytes},
         {"drafter_rows", &m.drafter_rows}, {"prompt_tokens", &m.prompt_tokens}, {"answer_tokens", &m.answer_tokens},
         {"experts", &f.n_expert},          {"session_base_bytes", &session_base}};
     const std::map<std::string, double*> model_reals = {{"miss_ms", &m.miss_ms},
@@ -303,6 +304,7 @@ std::string split_plan_json(const SplitFacts& f, const SplitPlan& p) {
     whole("prompt_tokens", m.prompt_tokens);
     whole("prompt_chunk", m.prompt_chunk);
     whole("prompt_row_bytes", m.prompt_row_bytes);
+    whole("drafter_row_bytes", m.drafter_row_bytes > 0 ? m.drafter_row_bytes : m.prompt_row_bytes);
     whole("drafter_rows", m.drafter_rows);
     whole("answer_tokens", m.answer_tokens);
     whole("kv_copies", m.kv_copies);
