@@ -176,7 +176,9 @@ def record() -> dict:
 #   STRATA_VERIFY_DEFER_CPU "0": main-next's d884c0d0 (setup turns the deferral off with the tail skip), not
 #     recorded in the baseline
 _DEFER_OFF = {"env.STRATA_VERIFY_DEFER_CPU": "0"}
-KNOWN_DIFFERENCES = {"96GB-1x16GB unsloth UD-Q4_K_XL": _DEFER_OFF, "128GB-1x24GB unsloth UD-Q4_K_XL": _DEFER_OFF}
+KNOWN_DIFFERENCES = {"96GB-1x16GB unsloth UD-Q4_K_XL": _DEFER_OFF, "128GB-1x24GB unsloth UD-Q4_K_XL": _DEFER_OFF,
+                     "64GB-1x32GB unsloth UD-Q4_K_XL": _DEFER_OFF, "32GB-2x24GB unsloth UD-Q4_K_XL": _DEFER_OFF,
+                     "47GB-2x16GB unsloth UD-Q4_K_XL": _DEFER_OFF}
 
 
 def with_differences(config: dict, changes: dict) -> dict:
@@ -266,7 +268,7 @@ class Golden(unittest.TestCase):
 
 if __name__ == "__main__":
     if "--write" in sys.argv:
-        GOLDEN.write_text(json.dumps(record(), indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        GOLDEN.write_text(json.dumps(record(), indent=1, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
         print(f"wrote {GOLDEN}")
     else:
         unittest.main()

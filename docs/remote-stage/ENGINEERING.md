@@ -1011,6 +1011,39 @@ Open: `STRATA_PRIMARY_DEVICE` other than 0 on a worker is allowed and not checke
 device 0); a checkpoint taken from `STRATA_CKPT_POOL` that the worker did not store is dropped rather than given back
 (`src/program/generate.cpp:9757-9760`); `clear_marks` (`src/program/generate.cpp:1788`) does not clear `remote_id`.
 
+### After the merge of 0.2.20 (2026-11-23)
+
+Upstream v0.2.20 (engine 0.1.66, 657 commits after v0.2.16) was merged; `LINK_VERSION` is now 0.1.66-net.1. What met
+a remote stage:
+- **The STRATA_HC_Q8 window read**: 0.2.19 and 0.2.20 added tensor-core kernels for it that read Q8_0 blocks staged in
+  shared memory with `__ldg`, a global load, so every decode window faulted ("illegal memory access" on sm_86,
+  "operation not supported on global/shared address space" on sm_120). Upstream leaves `STRATA_HC_Q8` off on CUDA; a
+  Link config sets it. The four kernels read their staged blocks with a plain load now (`hc_q8_tc_shared_test`).
+- **Own layers in the expert counts**: 0.2.20's coverage-based adaptive defaults (#4870), in the serve start and in
+  the resident setup, count only this process's layers on a remote stage, like the CPU share's "every expert is in the
+  GPU cache" check. The CPU share's card rule (`set_card_expert_share`) keeps upstream's count of every layer:
+  counting only its own layers, the main's share limit fell from 4,096 to 2,304 tokens and the 30K prompt read from
+  2,045 to 1,578 tok/s.
+- **`--conversation-cache-swap-block-mib`** (new, opt-in) swaps a parked conversation on one PC only, so a remote main
+  refuses it at start.
+- **The route tail skip is off by default** (0.2.17): the server sets `STRATA_ROUTE_TAIL_SKIP=0` when the config does
+  not name it. On the two PCs below that costs a fifth of the decode speed; `STRATA_ROUTE_TAIL_SKIP=7` in the config's
+  `env` brings it back. Setup writes `STRATA_VERIFY_DEFER_CPU=0` beside it in every Unsloth config now (before, only
+  where every expert is in RAM) and rewrites the key on its next run, so an Unsloth config in RAM-budget mode on an
+  NVIDIA PC goes from Expert Deferral on to off.
+- **The prompt loan Link moved out of the request loop** takes upstream's new boundary scrub; the worker's adaptive
+  round takes a usage snapshot only when no swaps are pending, as upstream's own rounds do.
+
+Measured on two PCs (a main with an RTX 3080, layers 0-29 and the head; a worker with an RTX 5070, layers 30-47; 1 GbE;
+Unsloth UD-IQ4_XS-v31, `--prefill 2944`, `STRATA_HC_Q8=1`), 2026-11-23:
+
+| | decode, three short prompts (tok/s) | 30K needle read (tok/s) |
+|---|---|---|
+| 0.1.66, tail skip unset (off) | 58.4 / 62.6 / 65.8 | 2,044 |
+| 0.1.66, `STRATA_ROUTE_TAIL_SKIP=7` | 65.7 / 81.9 / 83.7 | 2,005 |
+
+Picture prompts worked across the split and the 30K needle was found; no engine error line on either PC.
+
 ### After the merge of 0.2.16 (2026-11-19)
 
 Upstream v0.2.16 (engine 0.1.62, 1,671 commits after v0.2.13.1) was merged into `merge-0.2.16`; `LINK_VERSION` is now
