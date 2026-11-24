@@ -7,9 +7,9 @@ prompt chunk, and writes the configs that run them.
                                                               (then serve OUTDIR/main.json as any config)
     python3 tools/stage_tune.py plan  cluster.json FACTS [--facts-only]
                                                               gather the facts for strata --plan-split from the
-                                                              agents and run it (needs each PC's "vram_keep_mib",
-                                                              "ram_keep_mib" and the "plan" block: docs/REMOTE_STAGE.md,
-                                                              "Gathering the facts")
+                                                              agents and run it (needs each PC's "ram_keep_mib" and
+                                                              the "plan" block: docs/REMOTE_STAGE.md, "Gathering the
+                                                              facts")
 
 cluster.json:
     {
@@ -802,10 +802,14 @@ def row_facts(env: dict, given: dict | None = None) -> dict:
     return f
 
 
-def pc_facts(name: str, info: dict, spec: dict) -> dict:
+def pc_facts(name: str, info: dict, spec: dict, keep: str | None = None) -> dict:
     """A PC's own facts from its /info (this PC's read here) and its cluster.json entry: the free VRAM of CUDA's first
-    GPU and the available RAM while no worker ran, less the entry's vram_keep_mib and ram_keep_mib, and the GPU's
-    layer_ms (unless the entry's "facts" give one)."""
+    GPU and the available RAM while no worker ran, less the entry's vram_keep_mib (or `keep`, the engine's default,
+    said when used) and ram_keep_mib, and the GPU's layer_ms (unless the entry's "facts" give one)."""
+    if keep and "vram_keep_mib" not in spec:
+        say(f"{name}: no vram_keep_mib given, so the engine's default of {keep} MiB is used; it is high, so the "
+            "estimate is pessimistic")
+        spec = {**spec, "vram_keep_mib": int(keep)}
     missing = [k for k in ("vram_keep_mib", "ram_keep_mib") if k not in spec]
     if missing:
         sys.exit(f"stage_tune: {name}: cluster.json gives no {' or '.join(missing)}")
@@ -838,12 +842,13 @@ def link_facts(hops: list[dict]) -> dict[str, dict]:
     return f
 
 
-def engine_facts(exe: str, cfg: dict, given: dict) -> dict:
+def engine_facts(exe: str, cfg: dict, known: set) -> dict:
     """What the engine sizes at load besides the experts, from `strata --serve ARGS --plan-sizes` with the main
-    config's args, env and cwd: session_base_bytes, session_layer_bytes and kv_host_layer.  Not asked when
-    cluster.json's "plan" gives all three."""
-    keys = {"session_base_bytes", "session_layer_bytes", "kv_host_layer"}
-    if keys <= given.get("facts", {}).keys() | given.get("node_facts", {}).keys():
+    config's args, env and cwd: session_base_bytes, session_layer_bytes and kv_host_layer, and a default
+    vram_keep_mib for the main and for a node (vram_keep_main_mib, vram_keep_node_mib).  Not asked when cluster.json
+    gives them all (`known`)."""
+    keys = {"session_base_bytes", "session_layer_bytes", "kv_host_layer", "vram_keep_main_mib", "vram_keep_node_mib"}
+    if keys <= known:
         return {}
     try:
         r = subprocess.run([exe, "--serve", *cfg["args"], "--plan-sizes"], capture_output=True, text=True,
@@ -872,7 +877,11 @@ def plan(cluster: dict, out: Path, facts_only: bool) -> None:
         pcs.append((n.name, info, spec))
     links = link_facts(measure_links(nodes))
     cfg = json.loads(Path(main["config"]).read_text(encoding="utf-8"))
-    sizes = engine_facts(main["exe"], cfg, given)
+    known = {*given.get("facts", {}), *given.get("node_facts", {})}
+    known |= {"vram_keep_main_mib"} if "vram_keep_mib" in main else set()
+    known |= {"vram_keep_node_mib"} if all("vram_keep_mib" in n for n in cluster["nodes"]) else set()
+    sizes = engine_facts(main["exe"], cfg, known)
+    keep = {role: sizes.pop(f"vram_keep_{role}_mib", None) for role in ("main", "node")}
     kv = {k: sizes.pop(k) for k in ["kv_host_layer"] if k in sizes}
     rows = row_facts({**os.environ, **cfg.get("env", {})}, given.get("facts", {}))
     gathered = {**model_facts(cfg["args"]), **rows, **sizes}
@@ -880,7 +889,7 @@ def plan(cluster: dict, out: Path, facts_only: bool) -> None:
     if given.get("calib"):
         lines.append("calib " + given["calib"])
     for name, info, spec in pcs:
-        f = {**pc_facts(name, info, spec), **kv, **given.get("node_facts", {}), **links.get(name, {}),
+        f = {**pc_facts(name, info, spec, keep["main" if spec is main else "node"]), **kv, **given.get("node_facts", {}), **links.get(name, {}),
              **spec.get("facts", {})}
         lines.append(f"node={name} " + " ".join(f"{k}={v}" for k, v in f.items()))
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
