@@ -176,7 +176,9 @@ def record() -> dict:
 #   STRATA_VERIFY_DEFER_CPU "0": main-next's d884c0d0 (setup turns the deferral off with the tail skip), not
 #     recorded in the baseline
 _DEFER_OFF = {"env.STRATA_VERIFY_DEFER_CPU": "0"}
-KNOWN_DIFFERENCES = {"96GB-1x16GB unsloth UD-Q4_K_XL": _DEFER_OFF, "128GB-1x24GB unsloth UD-Q4_K_XL": _DEFER_OFF}
+KNOWN_DIFFERENCES = {"96GB-1x16GB unsloth UD-Q4_K_XL": _DEFER_OFF, "128GB-1x24GB unsloth UD-Q4_K_XL": _DEFER_OFF,
+                     "64GB-1x32GB unsloth UD-Q4_K_XL": _DEFER_OFF, "32GB-2x24GB unsloth UD-Q4_K_XL": _DEFER_OFF,
+                     "47GB-2x16GB unsloth UD-Q4_K_XL": _DEFER_OFF}
 
 
 def with_differences(config: dict, changes: dict) -> dict:
